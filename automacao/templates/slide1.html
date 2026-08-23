@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin:0; padding:0; }
+  body {
+    width: 1080px; height: 1350px;
+    background: radial-gradient(circle at 15% 0%, #171b24 0%, #0B0D12 55%);
+    font-family: 'IBM Plex Sans', 'Poppins', Arial, sans-serif;
+    color: #F5F1E6;
+    position: relative;
+    overflow: hidden;
+  }
+  .frame {
+    height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 110px;
+  }
+  .paragraph {
+    font-family: 'Lora', Georgia, serif;
+    font-weight: 700;
+    font-size: 42px;
+    line-height: 1.5;
+    max-width: 830px;
+    color: #F5F1E6;
+  }
+  .paragraph mark {
+    background: #D9A544;
+    color: #14151C;
+    padding: 2px 8px;
+    border-radius: 4px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  .divider {
+    width: 100%;
+    max-width: 760px;
+    border-top: 3px dashed #D9A544;
+    margin: 56px 0 44px;
+    opacity: 0.85;
+  }
+  .brand { display: flex; flex-direction: column; align-items: center; }
+  .brand-dash { width: 90px; border-top: 3px solid #D9A544; margin-bottom: 20px; }
+  .brand-name {
+    font-family: 'Lora', Georgia, serif;
+    font-weight: 700;
+    font-size: 38px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #D9A544;
+  }
+  .brand-sub {
+    font-family: 'IBM Plex Sans', 'Poppins', Arial, sans-serif;
+    font-weight: 600;
+    font-size: 20px;
+    letter-spacing: 7px;
+    text-transform: uppercase;
+    margin-top: 8px;
+    color: #C9C4B4;
+  }
+  .brand-dash-bottom { width: 90px; border-top: 3px solid #D9A544; margin-top: 20px; }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <div class="paragraph">{{PARAGRAFO_DESTAQUE}}</div>
+    <div class="divider"></div>
+    <div class="brand">
+      <div class="brand-dash"></div>
+      <div class="brand-name">Atlas</div>
+      <div class="brand-sub">Tributos</div>
+      <div class="brand-dash-bottom"></div>
+    </div>
+  </div>
+</body>
+</html>
