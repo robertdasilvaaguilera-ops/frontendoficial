@@ -102,6 +102,48 @@ def iniciar():
             PRIMARY KEY (usuario, dia)
         )
     """)
+    # Mídia Social - automação de posts de Instagram (ver social/*.py e as
+    # rotas /social/* em api_server.py). Config é uma linha única (id=1);
+    # decisões usadas evita repetir a mesma decisão em posts futuros; posts
+    # é o histórico (sucesso ou erro) mostrado na aba Mídia Social.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS social_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ativo INTEGER NOT NULL DEFAULT 0,
+            temas TEXT NOT NULL DEFAULT '[]',
+            objetivos TEXT NOT NULL DEFAULT '',
+            tom TEXT NOT NULL DEFAULT '',
+            horarios TEXT NOT NULL DEFAULT '[]',
+            ig_access_token TEXT NOT NULL DEFAULT '',
+            ig_business_account_id TEXT NOT NULL DEFAULT '',
+            atualizado_em TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS social_decisoes_usadas (
+            decisao_id TEXT PRIMARY KEY,
+            usado_em TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS social_posts (
+            id TEXT PRIMARY KEY,
+            criado_em TEXT,
+            decisao_id TEXT,
+            titulo TEXT,
+            paragrafo_destaque TEXT,
+            headline2 TEXT,
+            sub2 TEXT,
+            legenda TEXT,
+            gancho TEXT,
+            imagem1_path TEXT,
+            imagem2_path TEXT,
+            status TEXT NOT NULL,
+            post_id TEXT,
+            permalink TEXT,
+            erro_detalhe TEXT
+        )
+    """)
     conn.commit()
     _migrar_credenciais_legado(conn)
     conn.close()
@@ -480,3 +522,169 @@ def limpar_sessoes_expiradas() -> None:
     conn.execute("DELETE FROM sessao WHERE expira_em <= ?", (agora,))
     conn.commit()
     conn.close()
+
+
+# --- Mídia Social (automação de posts de Instagram) -----------------------
+
+_SOCIAL_CONFIG_PADRAO = {
+    "ativo": False,
+    "temas": [],
+    "objetivos": "",
+    "tom": "",
+    "horarios": [],
+    "igAccessToken": "",
+    "igBusinessAccountId": "",
+}
+
+
+def obter_social_config() -> dict:
+    conn = _conectar()
+    linha = conn.execute("SELECT * FROM social_config WHERE id = 1").fetchone()
+    conn.close()
+    if not linha:
+        return dict(_SOCIAL_CONFIG_PADRAO)
+    return {
+        "ativo": bool(linha["ativo"]),
+        "temas": json.loads(linha["temas"] or "[]"),
+        "objetivos": linha["objetivos"] or "",
+        "tom": linha["tom"] or "",
+        "horarios": json.loads(linha["horarios"] or "[]"),
+        "igAccessToken": linha["ig_access_token"] or "",
+        "igBusinessAccountId": linha["ig_business_account_id"] or "",
+    }
+
+
+def salvar_social_config(dados: dict) -> dict:
+    """Upsert da linha única de configuração (id=1). Campos ausentes em
+    `dados` mantêm o valor já salvo (permite, por ex., atualizar só os
+    horários sem reenviar o token do Instagram)."""
+    atual = obter_social_config()
+    mesclado = {**atual, **{k: v for k, v in dados.items() if v is not None}}
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        """
+        INSERT INTO social_config
+            (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id, atualizado_em)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
+            tom = excluded.tom, horarios = excluded.horarios,
+            ig_access_token = excluded.ig_access_token,
+            ig_business_account_id = excluded.ig_business_account_id,
+            atualizado_em = excluded.atualizado_em
+        """,
+        (
+            int(bool(mesclado["ativo"])),
+            json.dumps(mesclado["temas"], ensure_ascii=False),
+            mesclado["objetivos"],
+            mesclado["tom"],
+            json.dumps(mesclado["horarios"], ensure_ascii=False),
+            mesclado["igAccessToken"],
+            mesclado["igBusinessAccountId"],
+            agora,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return obter_social_config()
+
+
+def social_decisao_ja_usada(decisao_id: str) -> bool:
+    conn = _conectar()
+    linha = conn.execute(
+        "SELECT 1 FROM social_decisoes_usadas WHERE decisao_id = ?", (decisao_id,)
+    ).fetchone()
+    conn.close()
+    return linha is not None
+
+
+def listar_social_decisoes_usadas() -> set[str]:
+    conn = _conectar()
+    linhas = conn.execute("SELECT decisao_id FROM social_decisoes_usadas").fetchall()
+    conn.close()
+    return {l["decisao_id"] for l in linhas}
+
+
+def marcar_social_decisao_usada(decisao_id: str) -> None:
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        "INSERT OR IGNORE INTO social_decisoes_usadas (decisao_id, usado_em) VALUES (?, ?)",
+        (decisao_id, agora),
+    )
+    conn.commit()
+    conn.close()
+
+
+def inserir_social_post(dados: dict) -> dict:
+    id_ = uuid.uuid4().hex[:12]
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        """
+        INSERT INTO social_posts (
+            id, criado_em, decisao_id, titulo, paragrafo_destaque, headline2, sub2,
+            legenda, gancho, imagem1_path, imagem2_path, status, post_id, permalink, erro_detalhe
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            id_, agora,
+            dados.get("decisaoId"), dados.get("titulo", ""),
+            dados.get("paragrafoDestaque", ""), dados.get("headline2", ""), dados.get("sub2", ""),
+            dados.get("legenda", ""), dados.get("gancho", ""),
+            dados.get("imagem1Path"), dados.get("imagem2Path"),
+            dados.get("status", "erro"), dados.get("postId"), dados.get("permalink"),
+            dados.get("erroDetalhe"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return obter_social_post(id_)
+
+
+def obter_social_post(id_: str) -> dict | None:
+    conn = _conectar()
+    linha = conn.execute("SELECT * FROM social_posts WHERE id = ?", (id_,)).fetchone()
+    conn.close()
+    return _linha_social_post_para_dict(linha) if linha else None
+
+
+def listar_social_posts(limit: int = 30) -> list[dict]:
+    conn = _conectar()
+    linhas = conn.execute(
+        "SELECT * FROM social_posts ORDER BY criado_em DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [_linha_social_post_para_dict(l) for l in linhas]
+
+
+def ultimos_ganchos_social(n: int = 5) -> list[str]:
+    conn = _conectar()
+    linhas = conn.execute(
+        "SELECT gancho FROM social_posts WHERE status = 'publicado' AND gancho != '' "
+        "ORDER BY criado_em DESC LIMIT ?",
+        (n,),
+    ).fetchall()
+    conn.close()
+    return [l["gancho"] for l in linhas]
+
+
+def _linha_social_post_para_dict(linha: sqlite3.Row) -> dict:
+    return {
+        "id": linha["id"],
+        "criadoEm": linha["criado_em"],
+        "decisaoId": linha["decisao_id"],
+        "titulo": linha["titulo"] or "",
+        "paragrafoDestaque": linha["paragrafo_destaque"] or "",
+        "headline2": linha["headline2"] or "",
+        "sub2": linha["sub2"] or "",
+        "legenda": linha["legenda"] or "",
+        "gancho": linha["gancho"] or "",
+        "imagem1Path": linha["imagem1_path"],
+        "imagem2Path": linha["imagem2_path"],
+        "status": linha["status"],
+        "postId": linha["post_id"],
+        "permalink": linha["permalink"],
+        "erroDetalhe": linha["erro_detalhe"],
+    }

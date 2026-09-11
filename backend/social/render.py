@@ -1,0 +1,416 @@
+"""
+Renderizador server-side das duas imagens do post automático de Instagram
+(1080x1350 cada) - a mesma identidade visual validada manualmente (fundo
+azul-marinho em degradê radial, tipografia serifada Lora dourada/creme,
+destaque em `<mark>` dourado, rodapé de marca) - só que gerada com Pillow
+em vez de HTML + navegador, porque este backend não tem Node/Playwright e
+roda como serviço de longa duração no Railway (mais leve e mais robusto
+sem depender de um Chromium headless em produção).
+
+Convenção de destaque: o chamador usa `§§texto§§` para marcar os trechos
+que devem virar o grifo dourado (mesma convenção usada no resto da geração
+de conteúdo da ATLAS) - ver `parse_marks`.
+"""
+from __future__ import annotations
+
+import math
+import os
+import re
+from dataclasses import dataclass
+
+from PIL import Image, ImageDraw, ImageFont
+
+_PASTA = os.path.dirname(os.path.abspath(__file__))
+_FONTE_LORA = os.path.join(_PASTA, "fonts", "Lora-Variable.ttf")
+_FONTE_PLEX = os.path.join(_PASTA, "fonts", "IBMPlexSans-Variable.ttf")
+
+LARGURA = 1080
+ALTURA = 1350
+
+# Paleta - mesma do template HTML original (automacao/templates/slide{1,2}.html)
+COR_TEXTO = (245, 241, 230)  # #F5F1E6
+COR_TEXTO_MUTED = (201, 196, 180)  # #C9C4B4
+COR_DOURADO = (217, 165, 68)  # #D9A544
+COR_TEXTO_SOBRE_DOURADO = (20, 21, 28)  # #14151C
+COR_GRAD_CLARO = (23, 27, 36)  # #171b24
+COR_GRAD_ESCURO = (11, 13, 18)  # #0B0D12
+
+# Padding horizontal/vertical do grifo dourado atrás de um trecho marcado -
+# equivalente ao `padding: 2px 8px` do CSS original. Diferente do CSS (onde
+# o padding empurra o layout ao redor), aqui reservamos esse espaço na conta
+# de posicionamento (ver `_layout_linha`) para o grifo nunca invadir a
+# palavra vizinha.
+PAD_H = 8
+PAD_V = 6
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002190-\U000021FF"
+    "\U0000FE0F\U0000200D"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _sem_emoji(texto: str) -> str:
+    """As artes (parágrafo/headline/sub) não usam emoji no design aprovado -
+    isso só existe como rede de segurança, já que a Lora/IBM Plex Sans não
+    têm glifo de emoji (viraria um □ na imagem em vez de travar a geração)."""
+    return re.sub(r"\s+", " ", _EMOJI_RE.sub("", texto)).strip()
+
+
+def _fonte(caminho: str, tamanho: int, peso: bytes = b"Regular") -> ImageFont.FreeTypeFont:
+    fonte = ImageFont.truetype(caminho, tamanho)
+    try:
+        fonte.set_variation_by_name(peso)
+    except Exception:
+        pass  # variação indisponível - segue com o peso default da fonte
+    return fonte
+
+
+def _gradiente_radial(size: tuple[int, int], centro_pct: tuple[float, float]) -> Image.Image:
+    """Aproxima o `radial-gradient(circle at X% Y%, claro 0%, escuro 55%)`
+    do CSS original: interpola claro->escuro conforme a distância do centro,
+    saturando em escuro a partir de 55% do raio até o canto mais distante."""
+    w, h = size
+    cx, cy = w * centro_pct[0], h * centro_pct[1]
+    cantos = [(0, 0), (w, 0), (0, h), (w, h)]
+    raio_max = max(math.hypot(cx - x, cy - y) for x, y in cantos)
+    parada = 0.55
+
+    img = Image.new("RGB", size)
+    px = img.load()
+    for y in range(h):
+        dy = y - cy
+        for x in range(w):
+            dx = x - cx
+            d = math.hypot(dx, dy) / raio_max
+            t = min(1.0, d / parada)
+            r = round(COR_GRAD_CLARO[0] + (COR_GRAD_ESCURO[0] - COR_GRAD_CLARO[0]) * t)
+            g = round(COR_GRAD_CLARO[1] + (COR_GRAD_ESCURO[1] - COR_GRAD_CLARO[1]) * t)
+            b = round(COR_GRAD_CLARO[2] + (COR_GRAD_ESCURO[2] - COR_GRAD_CLARO[2]) * t)
+            px[x, y] = (r, g, b)
+    return img
+
+
+@dataclass
+class Palavra:
+    texto: str
+    marcada: bool
+
+
+def parse_marks(texto: str) -> list[tuple[str, bool]]:
+    """`"a §§b§§ c"` -> `[("a ", False), ("b", True), (" c", False)]` -
+    mesma convenção de `§§...§§` alternando dentro/fora de destaque a cada
+    marcador, usada em todo o resto da geração de conteúdo da ATLAS."""
+    partes = texto.split("§§")
+    return [(parte, i % 2 == 1) for i, parte in enumerate(partes) if parte]
+
+
+def _palavras(segments: list[tuple[str, bool]]) -> list[Palavra]:
+    palavras: list[Palavra] = []
+    for texto, marcada in segments:
+        for tok in texto.split(" "):
+            if tok:
+                palavras.append(Palavra(tok, marcada))
+    return palavras
+
+
+def _preparar_palavras(texto: str) -> list[Palavra]:
+    return _palavras(parse_marks(_sem_emoji(texto)))
+
+
+def _quebrar_linhas(
+    draw: ImageDraw.ImageDraw, palavras: list[Palavra], fonte: ImageFont.FreeTypeFont, largura_max: int
+) -> list[list[Palavra]]:
+    """Quebra de linha "greedy" clássica, preservando a flag `marcada` de
+    cada palavra para o desenho do grifo depois. Reserva uma folga extra
+    (2*PAD_H) sempre que a linha teria um trecho marcado, pra cobrir o
+    padding do grifo sem precisar remedir por fronteira (aproximação
+    suficiente: o grifo raramente ocupa a linha inteira)."""
+    espaco = draw.textlength(" ", font=fonte)
+    linhas: list[list[Palavra]] = []
+    linha_atual: list[Palavra] = []
+    largura_atual = 0.0
+    tem_marca_atual = False
+    largura_util = largura_max - 2 * PAD_H
+    for p in palavras:
+        largura_palavra = draw.textlength(p.texto, font=fonte)
+        acrescimo = largura_palavra + (espaco if linha_atual else 0)
+        limite = largura_max if not (tem_marca_atual or p.marcada) else largura_util
+        if linha_atual and largura_atual + acrescimo > limite:
+            linhas.append(linha_atual)
+            linha_atual = [p]
+            largura_atual = largura_palavra
+            tem_marca_atual = p.marcada
+        else:
+            linha_atual.append(p)
+            largura_atual += acrescimo
+            tem_marca_atual = tem_marca_atual or p.marcada
+    if linha_atual:
+        linhas.append(linha_atual)
+    return linhas
+
+
+def _layout_linha(
+    draw: ImageDraw.ImageDraw,
+    linha: list[Palavra],
+    fonte_normal: ImageFont.FreeTypeFont,
+    fonte_marcada: ImageFont.FreeTypeFont,
+    largura_canvas: int,
+) -> tuple[list[float], list[float]]:
+    """Calcula a posição x de cada palavra da linha (centralizada) e a
+    largura de cada uma, JÁ reservando o padding do grifo nas fronteiras
+    marcado/não-marcado - assim o retângulo do destaque nunca precisa
+    "invadir" o espaço de uma palavra vizinha (ver PAD_H)."""
+    espaco_normal = draw.textlength(" ", font=fonte_normal)
+    espaco_marc = draw.textlength(" ", font=fonte_marcada)
+    larguras = [
+        draw.textlength(p.texto, font=(fonte_marcada if p.marcada else fonte_normal))
+        for p in linha
+    ]
+
+    gaps_antes = [0.0] * len(linha)
+    for i in range(1, len(linha)):
+        gap = espaco_marc if (linha[i].marcada or linha[i - 1].marcada) else espaco_normal
+        if linha[i].marcada != linha[i - 1].marcada:
+            gap += PAD_H
+        gaps_antes[i] = gap
+
+    borda_ini = PAD_H if linha and linha[0].marcada else 0.0
+    borda_fim = PAD_H if linha and linha[-1].marcada else 0.0
+    largura_linha = sum(larguras) + sum(gaps_antes) + borda_ini + borda_fim
+    x0 = (largura_canvas - largura_linha) / 2
+
+    xs: list[float] = []
+    x_cursor = x0 + borda_ini
+    for i in range(len(linha)):
+        x_cursor += gaps_antes[i]
+        xs.append(x_cursor)
+        x_cursor += larguras[i]
+
+    return xs, larguras
+
+
+def _desenhar_linha_rica(
+    draw: ImageDraw.ImageDraw,
+    linha: list[Palavra],
+    fonte_normal: ImageFont.FreeTypeFont,
+    fonte_marcada: ImageFont.FreeTypeFont,
+    y_baseline_normal: float,
+    largura_canvas: int,
+    cor_normal: tuple[int, int, int],
+) -> None:
+    """Desenha uma linha centralizada, com grifo dourado atrás de cada
+    trecho contínuo marcado (equivalente ao `<mark>` +
+    `box-decoration-break: clone` do CSS). `y_baseline_normal` é a linha de
+    base (baseline) do texto não-marcado - se a fonte marcada tiver tamanho
+    diferente (caso do subtítulo do slide 2), o texto marcado é alinhado
+    pela MESMA baseline, não pelo topo, pra não "flutuar" fora do lugar."""
+    if not linha:
+        return
+    xs, larguras = _layout_linha(draw, linha, fonte_normal, fonte_marcada, largura_canvas)
+    ascent_normal, _ = fonte_normal.getmetrics()
+    ascent_marc, _ = fonte_marcada.getmetrics()
+    y_topo_normal = y_baseline_normal - ascent_normal
+    y_topo_marc = y_baseline_normal - ascent_marc
+
+    # 1a passada: grifo dourado atrás de cada trecho contínuo marcado
+    i = 0
+    while i < len(linha):
+        if linha[i].marcada:
+            j = i
+            while j < len(linha) and linha[j].marcada:
+                j += 1
+            x_ini = xs[i] - PAD_H
+            x_fim = xs[j - 1] + larguras[j - 1] + PAD_H
+            draw.rounded_rectangle(
+                [x_ini, y_topo_marc - PAD_V, x_fim, y_topo_marc + ascent_marc + PAD_V],
+                radius=8,
+                fill=COR_DOURADO,
+            )
+            i = j
+        else:
+            i += 1
+
+    # 2a passada: o texto por cima
+    for i, p in enumerate(linha):
+        if p.marcada:
+            draw.text((xs[i], y_topo_marc), p.texto, font=fonte_marcada, fill=COR_TEXTO_SOBRE_DOURADO)
+        else:
+            draw.text((xs[i], y_topo_normal), p.texto, font=fonte_normal, fill=cor_normal)
+
+
+def _desenhar_paragrafo(
+    draw: ImageDraw.ImageDraw,
+    linhas: list[list[Palavra]],
+    fonte: ImageFont.FreeTypeFont,
+    y_topo: float,
+    largura_canvas: int,
+    line_height: float,
+    cor_texto: tuple[int, int, int] = COR_TEXTO,
+) -> float:
+    """Desenha um parágrafo de várias linhas onde marcado/não-marcado usam a
+    MESMA fonte (só muda a cor) - caso do parágrafo de destaque e da
+    manchete. Devolve a altura total ocupada."""
+    ascent, _ = fonte.getmetrics()
+    y = y_topo
+    for linha in linhas:
+        _desenhar_linha_rica(draw, linha, fonte, fonte, y + ascent, largura_canvas, cor_texto)
+        y += line_height
+    return y - y_topo
+
+
+def _desenhar_marca_atlas(
+    draw: ImageDraw.ImageDraw, y_topo: int, largura_canvas: int, escala: float = 1.0
+) -> int:
+    """Bloco de marca ATLAS (traço + "ATLAS" + "@atlas.tributos" + traço),
+    idêntico ao `.brand` do template HTML original. Devolve a altura ocupada."""
+    y = y_topo
+    largura_tra_co = 90
+    x_centro = largura_canvas / 2
+
+    draw.line(
+        [(x_centro - largura_tra_co / 2, y), (x_centro + largura_tra_co / 2, y)],
+        fill=COR_DOURADO, width=3,
+    )
+    y += 20 * escala
+
+    fonte_nome = _fonte(_FONTE_LORA, round(38 * escala), b"Bold")
+    nome = "ATLAS"
+    # letter-spacing manual (Pillow não suporta nativamente)
+    _desenhar_texto_com_tracking(draw, nome, fonte_nome, x_centro, y, 2, COR_DOURADO)
+    y += fonte_nome.getbbox(nome)[3] + 8 * escala
+
+    fonte_sub = _fonte(_FONTE_PLEX, round(20 * escala), b"SemiBold")
+    sub = "@ATLAS.TRIBUTOS"
+    _desenhar_texto_com_tracking(draw, sub, fonte_sub, x_centro, y, 7, COR_TEXTO_MUTED)
+    y += fonte_sub.getbbox(sub)[3] + 20 * escala
+
+    draw.line(
+        [(x_centro - largura_tra_co / 2, y), (x_centro + largura_tra_co / 2, y)],
+        fill=COR_DOURADO, width=3,
+    )
+    y += 3
+    return y - y_topo
+
+
+def _desenhar_texto_com_tracking(
+    draw: ImageDraw.ImageDraw,
+    texto: str,
+    fonte: ImageFont.FreeTypeFont,
+    x_centro: float,
+    y: float,
+    tracking: float,
+    cor: tuple[int, int, int],
+) -> None:
+    """Desenha `texto` centralizado em `x_centro`, com espaçamento extra
+    `tracking` (px) entre letras - equivalente ao `letter-spacing` do CSS,
+    que o Pillow não tem embutido."""
+    larguras = [draw.textlength(c, font=fonte) for c in texto]
+    largura_total = sum(larguras) + tracking * (len(texto) - 1)
+    x = x_centro - largura_total / 2
+    for c, lw in zip(texto, larguras):
+        draw.text((x, y), c, font=fonte, fill=cor)
+        x += lw + tracking
+
+
+def _linha_tracejada(
+    draw: ImageDraw.ImageDraw, y: int, largura_canvas: int, largura_max: int = 760
+) -> None:
+    largura = min(largura_max, largura_canvas - 220)
+    x0 = (largura_canvas - largura) / 2
+    x1 = x0 + largura
+    traco, vao = 14, 10
+    x = x0
+    while x < x1:
+        fim = min(x + traco, x1)
+        draw.line([(x, y), (fim, y)], fill=COR_DOURADO, width=3)
+        x += traco + vao
+
+
+def render_slide1(paragrafo_destaque: str, out_path: str) -> None:
+    """Imagem 1: parágrafo de destaque (regra + pegadinha) + marca ATLAS."""
+    img = _gradiente_radial((LARGURA, ALTURA), (0.15, 0.0))
+    draw = ImageDraw.Draw(img)
+
+    fonte_par = _fonte(_FONTE_LORA, 42, b"Bold")
+    largura_max_texto = 830
+    linhas = _quebrar_linhas(draw, _preparar_palavras(paragrafo_destaque), fonte_par, largura_max_texto)
+    line_height = round(42 * 1.5)
+    altura_paragrafo = line_height * len(linhas)
+
+    altura_divisor_bloco = 56 + 44
+    altura_marca = 20 + 46 + 8 + 24 + 20 + 3 + 23  # aprox. altura do bloco de marca (38px+20px+8px+20px)
+
+    altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
+    y = (ALTURA - altura_total) / 2
+
+    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height)
+    y += 56
+    _linha_tracejada(draw, int(y), LARGURA)
+    y += 44
+    _desenhar_marca_atlas(draw, int(y), LARGURA)
+
+    img.save(out_path, "PNG")
+
+
+def render_slide2(headline2: str, sub2: str, out_path: str) -> None:
+    """Imagem 2: manchete fixa + subtítulo (com o crédito à Atlas grifado) +
+    CTA pro link da bio + marca ATLAS."""
+    img = _gradiente_radial((LARGURA, ALTURA), (0.85, 1.0))
+    draw = ImageDraw.Draw(img)
+
+    fonte_headline = _fonte(_FONTE_LORA, 40, b"Bold")
+    # `white-space: nowrap` no template original - headline é sempre 1 linha só.
+    linhas_headline = [_preparar_palavras(headline2)]
+    altura_headline = round(40 * 1.25)
+
+    fonte_sub = _fonte(_FONTE_PLEX, 25, b"Regular")
+    fonte_sub_mark = _fonte(_FONTE_PLEX, 29, b"Bold")
+    largura_max_sub = 660
+    linhas_sub = _quebrar_linhas(draw, _preparar_palavras(sub2), fonte_sub, largura_max_sub)
+    altura_linha_sub = round(25 * 1.55)
+    altura_sub = altura_linha_sub * len(linhas_sub)
+
+    fonte_cta = _fonte(_FONTE_PLEX, 28, b"SemiBold")
+    altura_cta = fonte_cta.getbbox("Ag")[3]
+
+    altura_marca = 20 + 34 + 8 + 18 + 20 + 3
+    altura_total = (
+        altura_headline + 28 + altura_sub + 52 + 44 + altura_cta + 48 + altura_marca
+    )
+    y = (ALTURA - altura_total) / 2
+
+    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline)
+    y += 28
+    # sub usa fonte maior/mais pesada pro trecho marcado (baseline alinhada
+    # com o resto do subtítulo) - ver _desenhar_linha_rica.
+    ascent_sub, _ = fonte_sub.getmetrics()
+    for linha in linhas_sub:
+        _desenhar_linha_rica(draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, COR_TEXTO_MUTED)
+        y += altura_linha_sub
+    y += 52
+    _linha_tracejada(draw, int(y), LARGURA)
+    y += 44
+
+    cta_x_centro = LARGURA / 2
+    texto_cta_1, texto_cta_2 = "Toque no ", "link da bio"
+    texto_cta_3 = " e conheça a Atlas"
+    l1 = draw.textlength(texto_cta_1, font=fonte_cta)
+    l2 = draw.textlength(texto_cta_2, font=fonte_cta)
+    l3 = draw.textlength(texto_cta_3, font=fonte_cta)
+    x = cta_x_centro - (l1 + l2 + l3) / 2
+    draw.text((x, y), texto_cta_1, font=fonte_cta, fill=COR_TEXTO)
+    x += l1
+    draw.text((x, y), texto_cta_2, font=fonte_cta, fill=COR_DOURADO)
+    x += l2
+    draw.text((x, y), texto_cta_3, font=fonte_cta, fill=COR_TEXTO)
+    y += altura_cta + 48
+
+    _desenhar_marca_atlas(draw, int(y), LARGURA, escala=34 / 38)
+
+    img.save(out_path, "PNG")

@@ -14,6 +14,7 @@ import { Route as ClientesRouteImport } from './routes/clientes'
 import { Route as CopilotRouteImport } from './routes/copilot'
 import { Route as EstudioVisualRouteImport } from './routes/estudio-visual'
 import { Route as ListaRouteImport } from './routes/lista'
+import { Route as MidiaSocialRouteImport } from './routes/midia-social'
 import { Route as NoticiasRouteImport } from './routes/noticias'
 import { Route as UsuariosRouteImport } from './routes/usuarios'
 import { Route as OportunidadesIdRouteImport } from './routes/oportunidades.$id'
@@ -43,6 +44,11 @@ const ListaRoute = ListaRouteImport.update({
   path: '/lista',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MidiaSocialRoute = MidiaSocialRouteImport.update({
+  id: '/midia-social',
+  path: '/midia-social',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const NoticiasRoute = NoticiasRouteImport.update({
   id: '/noticias',
   path: '/noticias',
@@ -65,6 +71,7 @@ export interface FileRoutesByFullPath {
   '/copilot': typeof CopilotRoute
   '/estudio-visual': typeof EstudioVisualRoute
   '/lista': typeof ListaRoute
+  '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
   '/usuarios': typeof UsuariosRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
@@ -75,6 +82,7 @@ export interface FileRoutesByTo {
   '/copilot': typeof CopilotRoute
   '/estudio-visual': typeof EstudioVisualRoute
   '/lista': typeof ListaRoute
+  '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
   '/usuarios': typeof UsuariosRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
@@ -86,6 +94,7 @@ export interface FileRoutesById {
   '/copilot': typeof CopilotRoute
   '/estudio-visual': typeof EstudioVisualRoute
   '/lista': typeof ListaRoute
+  '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
   '/usuarios': typeof UsuariosRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
@@ -98,6 +107,7 @@ export interface FileRouteTypes {
     | '/copilot'
     | '/estudio-visual'
     | '/lista'
+    | '/midia-social'
     | '/noticias'
     | '/usuarios'
     | '/oportunidades/$id'
@@ -108,6 +118,7 @@ export interface FileRouteTypes {
     | '/copilot'
     | '/estudio-visual'
     | '/lista'
+    | '/midia-social'
     | '/noticias'
     | '/usuarios'
     | '/oportunidades/$id'
@@ -118,6 +129,7 @@ export interface FileRouteTypes {
     | '/copilot'
     | '/estudio-visual'
     | '/lista'
+    | '/midia-social'
     | '/noticias'
     | '/usuarios'
     | '/oportunidades/$id'
@@ -129,6 +141,7 @@ export interface RootRouteChildren {
   CopilotRoute: typeof CopilotRoute
   EstudioVisualRoute: typeof EstudioVisualRoute
   ListaRoute: typeof ListaRoute
+  MidiaSocialRoute: typeof MidiaSocialRoute
   NoticiasRoute: typeof NoticiasRoute
   UsuariosRoute: typeof UsuariosRoute
   OportunidadesIdRoute: typeof OportunidadesIdRoute
@@ -171,6 +184,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ListaRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/midia-social': {
+      id: '/midia-social'
+      path: '/midia-social'
+      fullPath: '/midia-social'
+      preLoaderRoute: typeof MidiaSocialRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/noticias': {
       id: '/noticias'
       path: '/noticias'
@@ -201,6 +221,7 @@ const rootRouteChildren: RootRouteChildren = {
   CopilotRoute: CopilotRoute,
   EstudioVisualRoute: EstudioVisualRoute,
   ListaRoute: ListaRoute,
+  MidiaSocialRoute: MidiaSocialRoute,
   NoticiasRoute: NoticiasRoute,
   UsuariosRoute: UsuariosRoute,
   OportunidadesIdRoute: OportunidadesIdRoute,

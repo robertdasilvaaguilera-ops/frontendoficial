@@ -32,10 +32,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-# Le o arquivo .env (nesta mesma pasta) ANTES de importar ai.claude_chat,
+# Lê o arquivo .env (nesta mesma pasta) ANTES de importar ai.claude_chat,
 # que le ANTHROPIC_API_KEY do ambiente assim que o modulo e importado.
 # override=True: o .env sempre vence, mesmo se ja existir uma variavel
 # ANTHROPIC_API_KEY antiga gravada no Windows (setx) ou no sistema -
@@ -52,6 +52,9 @@ from ai import (
 )
 import app_db
 import auth
+from social import pipeline as social_pipeline
+from social import scheduler as social_scheduler
+from social.instagram import ErroGraphAPI, testar_conexao as testar_conexao_instagram
 
 PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_EXCEL = os.path.join(PASTA_BASE, "reports", "oportunidades.xlsx")
@@ -71,12 +74,19 @@ app_db.iniciar()
 # quem já está deslogado), e a raiz (só devolve a lista de endpoints, sem
 # dado nenhum do usuário).
 _ROTAS_PUBLICAS = {"/", "/auth/status", "/auth/setup", "/auth/login", "/auth/logout"}
+# Prefixo servido sem login: as imagens do post automático de Instagram
+# precisam ser buscáveis publicamente pelos servidores da Meta (Graph API),
+# que não têm cookie de sessão nenhum - mesmo princípio de antes (ver
+# histórico do endpoint /automacao/imagem/{nome}), agora dentro do produto.
+_PREFIXOS_PUBLICOS = ("/social/imagem/",)
 NOME_COOKIE_SESSAO = "atlas_sessao"
 
 
 @app.middleware("http")
 async def exigir_login(request: Request, call_next):
     if request.method == "OPTIONS" or request.url.path in _ROTAS_PUBLICAS:
+        return await call_next(request)
+    if any(request.url.path.startswith(p) for p in _PREFIXOS_PUBLICOS):
         return await call_next(request)
     token = request.cookies.get(NOME_COOKIE_SESSAO)
     if not auth.sessao_valida(token):
@@ -347,6 +357,40 @@ def _aquecer_cache_no_boot():
     o usuário abre depois de iniciar o backend é que pagava os vários
     segundos de leitura do arquivo, parecendo o sistema inteiro travado."""
     _carregar_dados()
+    # Religa o agendador de posts automáticos de Instagram nos horários já
+    # salvos em social_config - ver social/scheduler.py. Passa esta função
+    # (não o módulo social) porque é ela quem sabe montar a lista de
+    # decisões candidatas a partir do DataFrame carregado acima.
+    social_scheduler.iniciar(lambda: _decisoes_candidatas_social(25))
+
+
+def _decisoes_candidatas_social(limit: int = 25) -> list[dict]:
+    """Mesma seleção/formato usado pela extinta automação externa
+    (`/automacao/decisoes-recentes`) - decisões mais recentes, mais novas
+    primeiro, no shape que `social/content.py` espera."""
+    df = _carregar_dados()
+    if df.empty:
+        return []
+    df_decisoes = df[df["tipo_conteudo"] == "decisao"]
+    if "data_publicacao" in df_decisoes.columns:
+        df_decisoes = df_decisoes.sort_values("data_publicacao", ascending=False)
+    df_pagina = df_decisoes.head(max(1, min(limit, 100)))
+    resultado = []
+    for _, row in df_pagina.iterrows():
+        opp = _linha_para_opportunity(row)
+        resultado.append({
+            "id": opp["id"],
+            "titulo": opp["titulo"],
+            "tribunal": opp["tribunal"],
+            "data_julgamento": opp["decisao"]["data"],
+            "setor_economico": ", ".join(opp["setores"]) if opp["setores"] else "",
+            "mecanismo": opp["mecanismo"],
+            "tributos": opp["tributos"],
+            "resumo": opp["decisao"]["ementa"] or opp["resumoExecutivo"],
+            "impacto_estimado": opp["impactoFinanceiro"],
+            "link_fonte": opp["decisao"]["urlOficial"],
+        })
+    return resultado
 
 
 def _gerar_id(row) -> str:
@@ -1133,6 +1177,122 @@ def gerar_parecer_endpoint(id: str, req: ParecerRequest, request: Request):
     return resultado
 
 
+# --- Mídia Social (automação de posts de Instagram) -----------------------
+# Aba "Mídia Social": o usuário configura temas/objetivos/tom, horários e as
+# credenciais do Instagram; o backend gera e publica os posts sozinho, nos
+# horários configurados (ver social/scheduler.py) - substitui a automação
+# externa que rodava fora do produto. Restrito a admin (guarda o token de
+# acesso da conta do Instagram, equivalente em sensibilidade ao login).
+
+class SocialConfigRequest(BaseModel):
+    ativo: bool | None = None
+    temas: list[str] | None = None
+    objetivos: str | None = None
+    tom: str | None = None
+    horarios: list[str] | None = None
+    igAccessToken: str | None = None
+    igBusinessAccountId: str | None = None
+
+
+_HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _mascarar_token(token: str) -> str:
+    if not token:
+        return ""
+    if len(token) <= 8:
+        return "•" * len(token)
+    return f"{token[:4]}{'•' * (len(token) - 8)}{token[-4:]}"
+
+
+@app.get("/social/config")
+def social_obter_config(request: Request):
+    _exigir_admin(request)
+    config = app_db.obter_social_config()
+    return {
+        **config,
+        "igAccessToken": _mascarar_token(config["igAccessToken"]),
+        "temToken": bool(config["igAccessToken"]),
+    }
+
+
+@app.put("/social/config")
+def social_salvar_config(req: SocialConfigRequest, request: Request):
+    _exigir_admin(request)
+    if req.horarios is not None:
+        invalidos = [h for h in req.horarios if not _HORARIO_RE.match(h)]
+        if invalidos:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Horário inválido (use HH:MM): {', '.join(invalidos)}",
+            )
+    dados = req.model_dump(exclude_unset=True)
+    # campo vazio no form de token não deve apagar o token já salvo -
+    # só atualiza se o usuário realmente digitou um novo.
+    if "igAccessToken" in dados and not dados["igAccessToken"]:
+        dados.pop("igAccessToken")
+    config = app_db.salvar_social_config(dados)
+    social_scheduler.recarregar()
+    return {
+        **config,
+        "igAccessToken": _mascarar_token(config["igAccessToken"]),
+        "temToken": bool(config["igAccessToken"]),
+    }
+
+
+class TestarConexaoRequest(BaseModel):
+    igAccessToken: str | None = None
+    igBusinessAccountId: str | None = None
+
+
+@app.post("/social/test-connection")
+def social_testar_conexao(req: TestarConexaoRequest, request: Request):
+    """Valida token + ID da conta - usa os valores enviados no corpo (tela
+    de configuração, antes de salvar) ou, se omitidos, os já salvos."""
+    _exigir_admin(request)
+    config = app_db.obter_social_config()
+    token = req.igAccessToken or config["igAccessToken"]
+    conta_id = req.igBusinessAccountId or config["igBusinessAccountId"]
+    if not token or not conta_id:
+        raise HTTPException(status_code=400, detail="Informe o token e o ID da conta do Instagram")
+    try:
+        info = testar_conexao_instagram(token, conta_id)
+    except ErroGraphAPI as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"A Meta recusou a credencial (HTTP {e.status_code}): {e.resposta}",
+        )
+    return {"ok": True, "username": info.get("username"), "nome": info.get("name")}
+
+
+@app.get("/social/posts")
+def social_listar_posts(request: Request, limit: int = 30):
+    _exigir_admin(request)
+    return app_db.listar_social_posts(limit)
+
+
+@app.post("/social/run-now")
+def social_publicar_agora(request: Request):
+    """Botão "Publicar agora" - roda o ciclo completo na hora (ignora o
+    toggle "ativo" e o agendamento), pra testar a configuração de ponta a
+    ponta sem esperar o próximo horário. Publica de verdade se as
+    credenciais estiverem corretas - não é um modo de simulação."""
+    _exigir_admin(request)
+    resultado = social_pipeline.executar_ciclo(_decisoes_candidatas_social(25), forcar=True)
+    return resultado
+
+
+@app.get("/social/imagem/{nome}")
+def social_obter_imagem(nome: str):
+    """Serve as imagens geradas pro post automático - precisa ser público
+    (sem cookie de sessão) pra Graph API da Meta conseguir buscar a URL ao
+    publicar o carrossel. Ver _PREFIXOS_PUBLICOS acima."""
+    caminho = os.path.join(social_pipeline.PASTA_IMAGENS, nome)
+    if "/" in nome or ".." in nome or not os.path.isfile(caminho):
+        raise HTTPException(status_code=404, detail="Imagem não encontrada")
+    return FileResponse(caminho, media_type="image/png")
+
+
 @app.get("/")
 def raiz():
     return {
@@ -1146,5 +1306,6 @@ def raiz():
             "/opportunities/{id}/imagens-sugeridas", "/news/{id}/imagens-sugeridas",
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
             "/auth/users",
+            "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
         ],
     }

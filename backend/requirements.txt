@@ -6,3 +6,9 @@ fastapi>=0.115.0
 uvicorn>=0.32.0
 pydantic>=2.9.0
 python-dotenv>=1.0.1
+
+# Mídia Social (ver social/*.py): renderização das imagens do post
+# automático de Instagram (Pillow) e o agendador em processo que dispara os
+# posts nos horários configurados (APScheduler).
+Pillow>=10.4.0
+APScheduler>=3.10.4

@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Radar, Users, Newspaper, Bot, Compass, Wand2, UserCog } from "lucide-react";
+import { Radar, Users, Newspaper, Bot, Compass, Wand2, UserCog, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { BotaoSair, useSessaoAtual } from "@/components/AuthGate";
 import { NIVEL_LABEL } from "@/lib/auth-api";
@@ -16,6 +16,7 @@ const nav: NavItem[] = [
   { to: "/noticias", label: "Notícias", icon: Newspaper },
   { to: "/copilot", label: "Copiloto ATLAS", icon: Bot },
   { to: "/estudio-visual", label: "Estúdio Visual", icon: Wand2 },
+  { to: "/midia-social", label: "Mídia Social", icon: Radio },
   { to: "/usuarios", label: "Usuários", icon: UserCog },
 ];
 
@@ -32,7 +33,7 @@ export function AppSidebar() {
   // só pra não oferecer um link que vai dar 403.
   const itensVisiveis = nav.filter((item) => {
     if (item.to === "/copilot") return sessao?.limites.chat !== false;
-    if (item.to === "/usuarios") return sessao?.nivel === "admin";
+    if (item.to === "/usuarios" || item.to === "/midia-social") return sessao?.nivel === "admin";
     return true;
   });
 
