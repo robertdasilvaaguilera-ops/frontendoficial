@@ -1,0 +1,18 @@
+# Segredos - nunca versionar (contém ANTHROPIC_API_KEY etc.)
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Dados/artefatos gerados pelo pipeline de coleta e pelo app em uso normal -
+# runtime, não código-fonte. Ficam no volume do Railway em produção; localmente
+# são regenerados rodando o pipeline / usando o app.
+reports/
+logs/
+dados_manuais/
+database/*.db
+atlas.db
+*.pkl

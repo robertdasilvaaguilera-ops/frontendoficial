@@ -1,0 +1,348 @@
+// Mock ATLAS data — mirrors the shape the Python backend will return.
+// Replace the `fetch*` functions in atlas-api.ts with real HTTP calls
+// once VITE_ATLAS_API_URL is set.
+
+import type { CarteiraSummary, ClientCase, NewsItem, Opportunity } from "./atlas-types";
+
+export const OPPORTUNITIES: Opportunity[] = [
+  {
+    id: "opp-piscofins-icms-bc",
+    titulo: "Recuperação de crédito de PIS/COFINS — exclusão do ICMS da base",
+    tipo: "oportunidade",
+    prioridade: "maxima",
+    novidade: "reforco",
+    estabilidade: "vinculante",
+    mecanismo: "Restituição/compensação administrativa dos últimos 5 anos",
+    tributos: ["PIS", "COFINS"],
+    regimes: ["Lucro Real", "Lucro Presumido"],
+    setores: ["Indústria", "Comércio Atacadista", "Comércio Varejista", "Serviços"],
+    justificativaSetor:
+      "Tema vinculante do STF (Tema 69) abrange amplamente indústria, comércio e serviços do regime não-cumulativo.",
+    cnaes: ["47.11-3", "10.99-6", "46.39-7"],
+    ufs: ["SP", "MG", "PR", "RS", "SC", "RJ", "BA", "GO"],
+    impactoFinanceiro: "muito_alto",
+    complexidade: "media",
+    tempoEstimadoDias: 45,
+    probabilidadeExito: "alta",
+    tribunal: "STF",
+    decisao: {
+      numero: "RE 574.706 / Tema 69",
+      orgao: "STF — Plenário",
+      relator: "Min. Cármen Lúcia",
+      data: "2026-06-18",
+      ementa:
+        "Modulação reafirmada. O ICMS destacado em nota fiscal não compõe a base de cálculo do PIS e da COFINS. Efeitos ex tunc para contribuintes com ação ajuizada até 15/03/2017.",
+      urlOficial: "https://portal.stf.jus.br/processos/detalhe.asp?incidente=2585258",
+    },
+    resumoExecutivo:
+      "Reforço da tese vinculante do Tema 69 abre janela objetiva para recuperar créditos indevidamente recolhidos, com risco processual baixo e execução administrativa via PER/DCOMP.",
+  },
+  {
+    id: "opp-difal-2022",
+    titulo: "DIFAL 2022 — inexigibilidade por ausência de anterioridade",
+    tipo: "oportunidade",
+    prioridade: "alta",
+    novidade: "consolidado",
+    estabilidade: "majoritaria",
+    mecanismo: "Restituição de DIFAL recolhido em 2022",
+    tributos: ["ICMS-DIFAL"],
+    regimes: ["Lucro Real", "Lucro Presumido", "Simples Nacional"],
+    setores: ["Comércio Eletrônico", "Comércio Varejista"],
+    justificativaSetor:
+      "Afeta diretamente operações de comércio eletrônico e varejo que recolheram DIFAL no período controvertido.",
+    cnaes: ["47.11-3", "47.89-0"],
+    ufs: ["SP", "RJ", "MG", "PR", "SC", "RS", "BA", "PE", "CE"],
+    impactoFinanceiro: "alto",
+    complexidade: "media",
+    tempoEstimadoDias: 60,
+    probabilidadeExito: "media",
+    tribunal: "STF",
+    decisao: {
+      numero: "ADI 7066 / 7070 / 7078",
+      orgao: "STF — Plenário",
+      relator: "Min. Alexandre de Moraes",
+      data: "2023-11-29",
+      ementa:
+        "LC 190/22 sujeita-se apenas à anterioridade nonagesimal, permitindo cobrança do DIFAL a partir de 05/04/2022. Modulação parcialmente rejeitada.",
+      urlOficial: "https://portal.stf.jus.br/processos/detalhe.asp?incidente=6314894",
+    },
+    resumoExecutivo:
+      "Estados que exigiram DIFAL antes de 05/04/2022 recolheram indevidamente. Janela ainda aberta para restituição em UFs específicas.",
+  },
+  {
+    id: "risk-subvencao-icms",
+    titulo: "Risco — Lei 14.789/23 exclui subvenções do lucro real (autuações em massa)",
+    tipo: "risco",
+    prioridade: "maxima",
+    novidade: "inedito",
+    estabilidade: "majoritaria",
+    mecanismo: "Autuação por glosa de exclusão de subvenção estadual",
+    tributos: ["IRPJ", "CSLL"],
+    regimes: ["Lucro Real"],
+    setores: ["Indústria", "Agronegócio", "Comércio Atacadista"],
+    justificativaSetor:
+      "Setores do Lucro Real que usam créditos presumidos/subvenções de ICMS como incentivo fiscal (indústria, agro, atacado).",
+    cnaes: ["10.99-6", "01.11-3", "46.39-7"],
+    ufs: ["SP", "GO", "MT", "MG", "PR", "SC"],
+    impactoFinanceiro: "muito_alto",
+    complexidade: "alta",
+    tempoEstimadoDias: 30,
+    probabilidadeExito: "media",
+    tribunal: "CARF",
+    decisao: {
+      numero: "Acórdão 9101-006.812",
+      orgao: "CARF — 1ª Turma da CSRF",
+      relator: "Cons. Edeli Bessa",
+      data: "2026-05-22",
+      ementa:
+        "Aplicação da Lei 14.789/23. Subvenções estaduais de ICMS não são automaticamente excluídas do lucro real — necessária habilitação prévia e comprovação de contrapartida.",
+      urlOficial: "https://carf.economia.gov.br/",
+    },
+    resumoExecutivo:
+      "CARF pacifica interpretação restritiva. Empresas com histórico de exclusão sem habilitação estão expostas a autuação com multa qualificada.",
+  },
+  {
+    id: "opp-selic-repeticao",
+    titulo: "SELIC na repetição de indébito — inconstitucionalidade da tributação",
+    tipo: "oportunidade",
+    prioridade: "alta",
+    novidade: "consolidado",
+    estabilidade: "vinculante",
+    mecanismo: "Restituição de IRPJ/CSLL sobre SELIC recebida em repetições",
+    tributos: ["IRPJ", "CSLL"],
+    regimes: ["Lucro Real", "Lucro Presumido"],
+    setores: ["Indústria", "Serviços", "Comércio Atacadista", "Construção Civil"],
+    justificativaSetor:
+      "Setores com receita financeira relevante sobre repetição de indébito — indústria, serviços, atacado e construção civil.",
+    cnaes: ["41.20-4", "62.01-5"],
+    ufs: ["SP", "RJ", "MG", "PR", "RS", "SC", "DF"],
+    impactoFinanceiro: "alto",
+    complexidade: "baixa",
+    tempoEstimadoDias: 40,
+    probabilidadeExito: "alta",
+    tribunal: "STF",
+    decisao: {
+      numero: "RE 1.063.187 / Tema 962",
+      orgao: "STF — Plenário",
+      data: "2021-09-27",
+      ementa:
+        "Inconstitucional a incidência de IRPJ e CSLL sobre a taxa SELIC recebida em repetição de indébito tributário.",
+      urlOficial: "https://portal.stf.jus.br/processos/detalhe.asp?incidente=5205567",
+    },
+    resumoExecutivo:
+      "Clientes que receberam repetições nos últimos 5 anos têm crédito líquido e certo.",
+  },
+  {
+    id: "opp-inss-terceiros",
+    titulo: "Limitação da base de contribuições a terceiros (Sistema S) — Tema 1.079",
+    tipo: "oportunidade",
+    prioridade: "media",
+    novidade: "reforco",
+    estabilidade: "vinculante",
+    mecanismo: "Restituição sobre folha limitada a 20 salários mínimos",
+    tributos: ["Contribuição a Terceiros"],
+    regimes: ["Lucro Real", "Lucro Presumido"],
+    setores: ["Indústria", "Serviços", "Comércio Varejista"],
+    justificativaSetor:
+      "Empresas do Lucro Real/Presumido com folha de pagamento expressiva, sujeitas a contribuições ao Sistema S.",
+    cnaes: ["47.11-3", "10.99-6"],
+    ufs: ["SP", "MG", "PR", "RS"],
+    impactoFinanceiro: "medio",
+    complexidade: "baixa",
+    tempoEstimadoDias: 30,
+    probabilidadeExito: "alta",
+    tribunal: "STJ",
+    decisao: {
+      numero: "REsp 1.898.532 / Tema 1.079",
+      orgao: "STJ — 1ª Seção",
+      data: "2024-03-13",
+      ementa:
+        "Base das contribuições a terceiros limitada a 20 salários mínimos, com modulação até 25/10/2020.",
+      urlOficial: "https://www.stj.jus.br/",
+    },
+    resumoExecutivo: "Ainda há janela para empresas com ação ajuizada antes da modulação.",
+  },
+  {
+    id: "risk-mp-1234",
+    titulo: "MP em tramitação — restringe compensação de prejuízo fiscal",
+    tipo: "risco",
+    prioridade: "alta",
+    novidade: "inedito",
+    estabilidade: "divergente",
+    mecanismo: "Aumento efetivo de IRPJ/CSLL a pagar em 2027",
+    tributos: ["IRPJ", "CSLL"],
+    regimes: ["Lucro Real"],
+    setores: ["Indústria", "Serviços"],
+    justificativaSetor:
+      "MP em tramitação afeta amplamente empresas do Lucro Real com prejuízo fiscal acumulado.",
+    cnaes: ["10.99-6", "62.01-5"],
+    ufs: ["SP", "MG", "RJ", "PR", "RS"],
+    impactoFinanceiro: "alto",
+    complexidade: "alta",
+    tempoEstimadoDias: 20,
+    probabilidadeExito: "media",
+    tribunal: "Congresso",
+    decisao: {
+      numero: "MP 1.234/2026",
+      orgao: "Congresso Nacional",
+      data: "2026-07-10",
+      ementa:
+        "Reduz de 30% para 20% o limite de compensação anual de prejuízo fiscal e base negativa da CSLL.",
+      urlOficial: "https://www.congressonacional.leg.br/",
+    },
+    resumoExecutivo:
+      "Impacto direto no fluxo de caixa tributário de 2027. Preparar planejamento antecipatório.",
+  },
+];
+
+export const NEWS: NewsItem[] = [
+  {
+    id: "news-1",
+    titulo: "STF pauta modulação de tese sobre incidência de ISS em software",
+    fonte: "Tribunal",
+    tribunal: "STF",
+    publicadoEm: "2026-07-24",
+    tributario: true,
+    resumo:
+      "Plenário deve retomar julgamento na próxima semana. Impacto direto em SaaS e licenciamento.",
+    urlOficial: "https://portal.stf.jus.br/",
+    tipo: "oportunidade",
+    prioridade: "alta",
+    mecanismo: "Definição de competência tributária ISS x ICMS",
+  },
+  {
+    id: "news-2",
+    titulo: "DOU publica Instrução Normativa da RFB sobre habilitação de subvenções",
+    fonte: "DOU",
+    publicadoEm: "2026-07-23",
+    tributario: true,
+    resumo:
+      "IN detalha procedimento de habilitação previsto pela Lei 14.789/23. Prazo de adequação: 90 dias.",
+    urlOficial: "https://www.in.gov.br/",
+    tipo: "risco",
+    prioridade: "maxima",
+    mecanismo: "Compliance obrigatório para exclusão de subvenção",
+  },
+  {
+    id: "news-3",
+    titulo: "MP 1.234/2026 altera limite de compensação de prejuízo fiscal",
+    fonte: "MP",
+    publicadoEm: "2026-07-10",
+    tributario: true,
+    resumo:
+      "Reduz limite de 30% para 20% da compensação anual de prejuízo fiscal e base negativa da CSLL.",
+    urlOficial: "https://www.congressonacional.leg.br/",
+    tipo: "risco",
+    prioridade: "alta",
+    mecanismo: "Aumento efetivo de IRPJ/CSLL 2027",
+  },
+  {
+    id: "news-4",
+    titulo: "CNJ divulga metas de julgamento para 2027",
+    fonte: "Tribunal",
+    tribunal: "STF",
+    publicadoEm: "2026-07-20",
+    tributario: false,
+    resumo: "Metas gerais do Poder Judiciário. Sem relação direta com matéria tributária.",
+    urlOficial: "https://www.cnj.jus.br/",
+  },
+  {
+    id: "news-5",
+    titulo: "STJ afeta novo tema repetitivo sobre PIS/COFINS-Importação",
+    fonte: "Tribunal",
+    tribunal: "STJ",
+    publicadoEm: "2026-07-19",
+    tributario: true,
+    resumo:
+      "1ª Seção afetou tema sobre inclusão do ICMS-Importação na base de PIS/COFINS-Importação.",
+    urlOficial: "https://www.stj.jus.br/",
+    tipo: "oportunidade",
+    prioridade: "media",
+    mecanismo: "Possível recuperação futura",
+  },
+];
+
+export const CLIENTS: ClientCase[] = [
+  {
+    id: "c1",
+    nome: "Metalúrgica Aurora Ltda",
+    cnpj: "12.345.678/0001-90",
+    regime: "Lucro Real",
+    setor: "Indústria",
+    cnae: "24.51-2",
+    uf: "SP",
+    cidade: "Sorocaba",
+    tributosRelevantes: ["PIS", "COFINS", "IRPJ", "CSLL", "ICMS"],
+    matches: 4,
+  },
+  {
+    id: "c2",
+    nome: "Distribuidora São Marcos S/A",
+    cnpj: "23.456.789/0001-12",
+    regime: "Lucro Presumido",
+    setor: "Comércio Atacadista",
+    cnae: "46.39-7",
+    uf: "MG",
+    cidade: "Contagem",
+    tributosRelevantes: ["PIS", "COFINS", "ICMS-DIFAL"],
+    matches: 3,
+  },
+  {
+    id: "c3",
+    nome: "Agro Verde Cerrado",
+    cnpj: "34.567.890/0001-33",
+    regime: "Lucro Real",
+    setor: "Agronegócio",
+    cnae: "01.11-3",
+    uf: "GO",
+    cidade: "Rio Verde",
+    tributosRelevantes: ["IRPJ", "CSLL", "ICMS"],
+    matches: 2,
+  },
+  {
+    id: "c4",
+    nome: "TechFlow Sistemas EIRELI",
+    cnpj: "45.678.901/0001-54",
+    regime: "Lucro Presumido",
+    setor: "Tecnologia",
+    cnae: "62.01-5",
+    uf: "SC",
+    cidade: "Florianópolis",
+    tributosRelevantes: ["ISS", "PIS", "COFINS"],
+    matches: 2,
+  },
+  {
+    id: "c5",
+    nome: "Construtora Horizonte",
+    cnpj: "56.789.012/0001-75",
+    regime: "Lucro Presumido",
+    setor: "Construção Civil",
+    cnae: "41.20-4",
+    uf: "RS",
+    cidade: "Porto Alegre",
+    tributosRelevantes: ["ISS", "PIS", "COFINS", "IRPJ"],
+    matches: 1,
+  },
+];
+
+const IMPACTO_PESO: Record<Opportunity["impactoFinanceiro"], number> = {
+  muito_alto: 1_000_000,
+  alto: 250_000,
+  medio: 50_000,
+  baixo: 10_000,
+};
+
+export function computeSummary(): CarteiraSummary {
+  const opps = OPPORTUNITIES.filter((o) => o.tipo === "oportunidade");
+  const risks = OPPORTUNITIES.filter((o) => o.tipo === "risco");
+  return {
+    totalClientes: CLIENTS.length,
+    oportunidadesHoje: opps.length,
+    riscosHoje: risks.length,
+    economiaPotencial: OPPORTUNITIES.reduce((s, o) => s + IMPACTO_PESO[o.impactoFinanceiro], 0),
+    alteracoesLegislativas: NEWS.filter((n) => n.fonte === "MP").length,
+    decisoesRelevantes: OPPORTUNITIES.filter(
+      (o) => o.tribunal !== "Congresso" && o.tribunal !== "DOU",
+    ).length,
+  };
+}
