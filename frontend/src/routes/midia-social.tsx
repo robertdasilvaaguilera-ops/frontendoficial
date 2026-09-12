@@ -9,7 +9,6 @@ import {
   Plus,
   Radio,
   Sparkles,
-  ShieldAlert,
   Trash2,
   UploadCloud,
   Wand2,
@@ -33,7 +32,6 @@ import {
   type SocialPost,
   type EstiloTipografico,
 } from "@/lib/social-api";
-import { useSessaoAtual } from "@/components/AuthGate";
 
 export const Route = createFileRoute("/midia-social")({
   head: () => ({
@@ -55,25 +53,9 @@ export const Route = createFileRoute("/midia-social")({
 });
 
 function MidiaSocial() {
-  const sessao = useSessaoAtual();
-
-  // Guarda o token de acesso da conta do Instagram - mesmo critério de
-  // "Usuários" (só o dono configura), o backend também já bloqueia (403).
-  if (sessao?.nivel !== "admin") {
-    return (
-      <div className="max-w-[1000px] mx-auto px-6 lg:px-10 py-8">
-        <div className="surface rounded-lg p-8 flex flex-col items-center text-center gap-3">
-          <ShieldAlert className="h-6 w-6 text-muted-foreground" />
-          <div className="text-sm font-medium">Área restrita ao administrador</div>
-          <p className="text-xs text-muted-foreground max-w-sm">
-            Só quem criou o ATLAS pode configurar a automação de Mídia Social (ela guarda o
-            acesso à conta do Instagram).
-          </p>
-        </div>
-      </div>
-    );
-  }
-
+  // Aberta pra toda a equipe, independente do nível (o backend também não
+  // exige mais admin aqui - só sessão válida, ver _exigir_sessao). Fica só
+  // "Usuários" restrito ao dono.
   return <MidiaSocialAdmin />;
 }
 

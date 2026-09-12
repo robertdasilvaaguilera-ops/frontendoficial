@@ -29,11 +29,12 @@ export function AppSidebar() {
     exact ? pathname === to : pathname.startsWith(to);
 
   // Copiloto ATLAS (chat) some pro nível básico; Usuários é só do dono
-  // (admin) - o backend já bloqueia os dois de qualquer forma, isso aqui é
-  // só pra não oferecer um link que vai dar 403.
+  // (admin, guarda logins da equipe) - o backend já bloqueia os dois de
+  // qualquer forma, isso aqui é só pra não oferecer um link que vai dar
+  // 403. Mídia Social é de toda a equipe, qualquer nível.
   const itensVisiveis = nav.filter((item) => {
     if (item.to === "/copilot") return sessao?.limites.chat !== false;
-    if (item.to === "/usuarios" || item.to === "/midia-social") return sessao?.nivel === "admin";
+    if (item.to === "/usuarios") return sessao?.nivel === "admin";
     return true;
   });
 

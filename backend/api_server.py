@@ -178,6 +178,16 @@ def _exigir_admin(request: Request) -> str:
     return info["usuario"]
 
 
+def _exigir_sessao(request: Request) -> str:
+    """Qualquer nível de usuário logado - usado pela Mídia Social, que é
+    uma ferramenta de toda a equipe, não só do dono (diferente de
+    /auth/users, que continua exclusivo do admin)."""
+    info = _sessao_atual(request)
+    if not info:
+        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
+    return info["usuario"]
+
+
 def _exigir_cota_geracao(request: Request) -> str:
     """Chamado no início de todo endpoint que gera parecer/post/carrossel
     via Claude - bloqueia ANTES de gastar a chamada se a cota semanal do
@@ -1322,7 +1332,7 @@ def _mascarar_token(token: str) -> str:
 
 @app.get("/social/config")
 def social_obter_config(request: Request):
-    _exigir_admin(request)
+    _exigir_sessao(request)
     config = app_db.obter_social_config()
     return {
         **config,
@@ -1333,7 +1343,7 @@ def social_obter_config(request: Request):
 
 @app.put("/social/config")
 def social_salvar_config(req: SocialConfigRequest, request: Request):
-    _exigir_admin(request)
+    _exigir_sessao(request)
     if req.horarios is not None:
         invalidos = [h for h in req.horarios if not _HORARIO_RE.match(h)]
         if invalidos:
@@ -1376,7 +1386,7 @@ class TestarConexaoRequest(BaseModel):
 def social_testar_conexao(req: TestarConexaoRequest, request: Request):
     """Valida token + ID da conta - usa os valores enviados no corpo (tela
     de configuração, antes de salvar) ou, se omitidos, os já salvos."""
-    _exigir_admin(request)
+    _exigir_sessao(request)
     config = app_db.obter_social_config()
     token = req.igAccessToken or config["igAccessToken"]
     conta_id = req.igBusinessAccountId or config["igBusinessAccountId"]
@@ -1445,7 +1455,7 @@ async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
     social/render.py) - guardado no mesmo volume persistente das imagens
     geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
     que já existe (a Graph API também precisa alcançar essas URLs)."""
-    _exigir_admin(request)
+    _exigir_sessao(request)
     nome_arquivo = await _salvar_imagem_upload(arquivo, "logo")
     config = app_db.salvar_social_config({"logoPath": nome_arquivo})
     return {"logoPath": config["logoPath"]}
@@ -1453,7 +1463,7 @@ async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
 
 @app.delete("/social/logo")
 def social_remover_logo(request: Request):
-    _exigir_admin(request)
+    _exigir_sessao(request)
     config = app_db.salvar_social_config({"logoPath": ""})
     return {"logoPath": config["logoPath"]}
 
@@ -1464,7 +1474,7 @@ async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile =
     sistema escreve o texto gerado por cima, na mesma área/fonte/cor já
     configuradas (ver render._fundo_slide). Substitui o degradê da
     identidade de marca só pra esse slide."""
-    _exigir_admin(request)
+    _exigir_sessao(request)
     if slide not in (1, 2):
         raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
     # o fundo cobre a imagem 1080x1350 inteira (ver render._fundo_slide) -
@@ -1476,7 +1486,7 @@ async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile =
 
 @app.delete("/social/fundo")
 def social_remover_fundo(request: Request, slide: int):
-    _exigir_admin(request)
+    _exigir_sessao(request)
     if slide not in (1, 2):
         raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
     config = app_db.salvar_social_config({f"fundo{slide}Path": ""})
@@ -1493,7 +1503,7 @@ def social_gerar_identidade(req: SocialIdentidadeIARequest, request: Request):
     e dourado") em cores + estilo tipográfico sugeridos - preenche o
     formulário, mas não salva nem publica nada sozinho (o usuário revisa,
     gera prévia e só então clica em Salvar)."""
-    _exigir_admin(request)
+    _exigir_sessao(request)
     descricao = req.descricao.strip()
     if not descricao:
         raise HTTPException(status_code=400, detail="Descreva a identidade visual que você imagina")
@@ -1526,7 +1536,7 @@ def social_preview(req: SocialPreviewRequest, request: Request):
     + overrides não salvos ainda, pra pré-visualizar cor/logo antes de
     clicar em Salvar) - usa um texto fixo de exemplo, nunca uma decisão
     real, então pode ser chamado quantas vezes quiser sem gastar Claude."""
-    _exigir_admin(request)
+    _exigir_sessao(request)
     for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
         valor = getattr(req, campo)
         if valor is not None and not _HEX_COR_RE.match(valor):
@@ -1550,7 +1560,7 @@ def social_preview(req: SocialPreviewRequest, request: Request):
 
 @app.get("/social/posts")
 def social_listar_posts(request: Request, limit: int = 30):
-    _exigir_admin(request)
+    _exigir_sessao(request)
     return app_db.listar_social_posts(limit)
 
 
@@ -1560,8 +1570,9 @@ def social_publicar_agora(request: Request):
     toggle "ativo" e o agendamento), pra testar a configuração de ponta a
     ponta sem esperar o próximo horário. Publica de verdade se as
     credenciais estiverem corretas - não é um modo de simulação."""
-    _exigir_admin(request)
+    usuario = _exigir_cota_geracao(request)
     resultado = social_pipeline.executar_ciclo(_decisoes_candidatas_social(25), forcar=True)
+    auth.registrar_geracao(usuario)
     return resultado
 
 
