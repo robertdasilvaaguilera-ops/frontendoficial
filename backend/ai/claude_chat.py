@@ -104,16 +104,34 @@ def _formatar_contexto(decisoes: list[dict], noticias: list[dict]) -> str:
 
 
 def chamar(
-    system: str, mensagens: list[dict], max_tokens: int = 1500, retornar_uso: bool = False
+    system: str,
+    mensagens: list[dict],
+    max_tokens: int = 1500,
+    retornar_uso: bool = False,
+    effort: str | None = None,
 ) -> str | tuple[str, dict]:
     """
     Chamada HTTP crua a Claude (Anthropic Messages API), com o tratamento de
     erro comum (chave ausente/invalida). Reaproveitada por perguntar() aqui
-    embaixo e por ai/social_post.py (gerador de posts de Instagram).
+    embaixo e por todos os outros módulos de ai/ e social/content.py.
 
     retornar_uso=True devolve (texto, {"tokensEntrada": N, "tokensSaida": N})
     em vez de só o texto - usado pelo chat do Copiloto pra medir o custo
     real da chamada contra o orçamento diário do usuário (ver auth.py).
+
+    O system prompt sempre vai com cache_control (5min) - todo module aqui
+    reusa o MESMO system prompt em toda chamada (às vezes várias vezes por
+    minuto, ex: testando cores na Mídia Social), então isso é puro ganho:
+    sem cache custaria caro reenviar o mesmo prompt longo do zero sempre;
+    com cache, a partir da 2a chamada dentro de 5min ele é lido a ~1/10 do
+    preço. Nao muda a resposta em nada, só o preço de chamadas repetidas.
+
+    effort: "low"/"medium"/"high"/"xhigh"/"max" (default do modelo se None)
+    - usado pra baratear tarefas mecânicas/estruturadas (ex: escolher uma
+    cor, extrair uma palavra-chave) que não se beneficiam de raciocínio
+    mais profundo. Deixado em None (raciocínio padrão) em tudo que gera
+    conteúdo pro cliente final (parecer, posts, legendas) - ali a
+    qualidade importa mais que economizar esse detalhe.
     """
     if not API_KEY:
         raise RuntimeError(
@@ -122,6 +140,15 @@ def chamar(
             "ou 'export ANTHROPIC_API_KEY=...' (Linux/Mac)."
         )
 
+    corpo = {
+        "model": MODELO,
+        "max_tokens": max_tokens,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "messages": mensagens,
+    }
+    if effort:
+        corpo["output_config"] = {"effort": effort}
+
     resposta = requests.post(
         URL,
         headers={
@@ -129,12 +156,7 @@ def chamar(
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
-        json={
-            "model": MODELO,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": mensagens,
-        },
+        json=corpo,
         timeout=120,
     )
 

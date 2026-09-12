@@ -167,6 +167,26 @@ def _gradiente_radial(
     return img
 
 
+def _luminancia_relativa(cor: tuple[int, int, int]) -> float:
+    """Luminância relativa (WCAG) - usada só pra medir contraste entre duas
+    cores, não pra escolher cor nenhuma."""
+    def _linear(c: int) -> float:
+        s = c / 255
+        return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+    r, g, b = cor
+    return 0.2126 * _linear(r) + 0.7152 * _linear(g) + 0.0722 * _linear(b)
+
+
+def razao_contraste(cor_a: tuple[int, int, int], cor_b: tuple[int, int, int]) -> float:
+    """Razão de contraste WCAG entre duas cores (1.0 = idênticas, 21.0 =
+    preto/branco). Usada pra impedir salvar uma cor de destaque ilegível
+    (o texto marcado é sempre escuro, então a cor de destaque precisa ter
+    contraste suficiente contra ele - e contra os dois fundos)."""
+    l1, l2 = _luminancia_relativa(cor_a), _luminancia_relativa(cor_b)
+    claro, escuro = max(l1, l2), min(l1, l2)
+    return (claro + 0.05) / (escuro + 0.05)
+
+
 def _fundo_imagem(caminho: str) -> Image.Image:
     """Fundo próprio do usuário (upload em /social/fundo) - recorta e
     redimensiona preenchendo o quadro (equivalente a `object-fit: cover`),
@@ -441,6 +461,14 @@ def _linha_tracejada(
         x += traco + vao
 
 
+# Tamanhos tentados em ordem, do desenhado ao menor ainda legível - protege
+# contra parágrafo/legenda mais longos que o normal (entrada de IA nem
+# sempre respeita o tamanho pedido) estourarem a moldura ou ficarem
+# espremidos: encolhe a fonte até caber, em vez de cortar ou sobrepor.
+_TAMANHOS_PARAGRAFO = [42, 38, 34, 30, 26, 23]
+_MARGEM_RESPIRO = 160  # espaço mínimo topo+rodapé fora do bloco de conteúdo
+
+
 def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
     """Imagem 1: parágrafo de destaque (regra + pegadinha) + marca do perfil."""
     img = _fundo_slide(marca, marca.fundo1_path, (0.15, 0.0))
@@ -448,16 +476,20 @@ def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_P
     fonte_titulo_path, _ = _fontes_da_marca(marca)
     cor_texto, _ = _cores_texto_da_marca(marca)
 
-    fonte_par = _fonte(fonte_titulo_path, 42, b"Bold")
-    largura_max_texto = 830
-    linhas = _quebrar_linhas(draw, _preparar_palavras(paragrafo_destaque), fonte_par, largura_max_texto)
-    line_height = round(42 * 1.5)
-    altura_paragrafo = line_height * len(linhas)
-
     altura_divisor_bloco = 56 + 44
     altura_marca = 20 + 46 + 8 + 24 + 20 + 3 + 23  # aprox. altura do bloco de marca (38px+20px+8px+20px)
+    altura_disponivel = ALTURA - _MARGEM_RESPIRO
 
-    altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
+    largura_max_texto = 830
+    palavras = _preparar_palavras(paragrafo_destaque)
+    for tamanho in _TAMANHOS_PARAGRAFO:
+        fonte_par = _fonte(fonte_titulo_path, tamanho, b"Bold")
+        linhas = _quebrar_linhas(draw, palavras, fonte_par, largura_max_texto)
+        line_height = round(tamanho * 1.5)
+        altura_paragrafo = line_height * len(linhas)
+        altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
+        if altura_total <= altura_disponivel:
+            break
     y = (ALTURA - altura_total) / 2
 
     y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque, cor_texto)
@@ -469,6 +501,10 @@ def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_P
     img.save(out_path, "PNG")
 
 
+_TAMANHOS_HEADLINE = [40, 36, 32, 28, 25]
+_TAMANHOS_SUB = [25, 23, 21, 19]  # fonte_sub_mark acompanha a +4 (proporção original)
+
+
 def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
     """Imagem 2: manchete fixa + subtítulo (com o crédito ao perfil grifado) +
     CTA pro link da bio + marca do perfil."""
@@ -477,25 +513,36 @@ def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA
     fonte_titulo_path, fonte_corpo_path = _fontes_da_marca(marca)
     cor_texto, cor_texto_muted = _cores_texto_da_marca(marca)
 
-    fonte_headline = _fonte(fonte_titulo_path, 40, b"Bold")
-    # `white-space: nowrap` no template original - headline é sempre 1 linha só.
+    # Headline é sempre 1 linha só ("nowrap") - se vier mais longa que o
+    # esperado (a IA nem sempre respeita o limite pedido no prompt),
+    # encolhe até caber na largura em vez de vazar pra fora da moldura.
+    largura_max_headline = LARGURA - 220
     linhas_headline = [_preparar_palavras(headline2)]
-    altura_headline = round(40 * 1.25)
+    for tamanho in _TAMANHOS_HEADLINE:
+        fonte_headline = _fonte(fonte_titulo_path, tamanho, b"Bold")
+        largura_headline = sum(draw.textlength(p.texto, font=fonte_headline) + 10 for p in linhas_headline[0])
+        if largura_headline <= largura_max_headline:
+            break
+    altura_headline = round(fonte_headline.size * 1.25)
 
-    fonte_sub = _fonte(fonte_corpo_path, 25, b"Regular")
-    fonte_sub_mark = _fonte(fonte_corpo_path, 29, b"Bold")
     largura_max_sub = 660
-    linhas_sub = _quebrar_linhas(draw, _preparar_palavras(sub2), fonte_sub, largura_max_sub)
-    altura_linha_sub = round(25 * 1.55)
-    altura_sub = altura_linha_sub * len(linhas_sub)
-
+    palavras_sub = _preparar_palavras(sub2)
+    altura_marca = 20 + 34 + 8 + 18 + 20 + 3
     fonte_cta = _fonte(fonte_corpo_path, 28, b"SemiBold")
     altura_cta = fonte_cta.getbbox("Ag")[3]
+    altura_disponivel = ALTURA - _MARGEM_RESPIRO
 
-    altura_marca = 20 + 34 + 8 + 18 + 20 + 3
-    altura_total = (
-        altura_headline + 28 + altura_sub + 52 + 44 + altura_cta + 48 + altura_marca
-    )
+    for tamanho_sub in _TAMANHOS_SUB:
+        fonte_sub = _fonte(fonte_corpo_path, tamanho_sub, b"Regular")
+        fonte_sub_mark = _fonte(fonte_corpo_path, tamanho_sub + 4, b"Bold")
+        linhas_sub = _quebrar_linhas(draw, palavras_sub, fonte_sub, largura_max_sub)
+        altura_linha_sub = round(tamanho_sub * 1.55)
+        altura_sub = altura_linha_sub * len(linhas_sub)
+        altura_total = (
+            altura_headline + 28 + altura_sub + 52 + 44 + altura_cta + 48 + altura_marca
+        )
+        if altura_total <= altura_disponivel:
+            break
     y = (ALTURA - altura_total) / 2
 
     y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque, cor_texto)

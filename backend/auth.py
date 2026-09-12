@@ -27,15 +27,25 @@ import app_db
 
 ITERACOES_PBKDF2 = 200_000
 DURACAO_SESSAO_DIAS = 30
+
+# Trava de força bruta no login - sem isso, /auth/login aceitava tentativas
+# ilimitadas (nada no proxy/infra do Railway limita isso por conta própria).
+# Por usuário tentado, não por IP: protege a conta mesmo contra tentativas
+# vindas de vários endereços diferentes.
+LIMITE_FALHAS_LOGIN = 5
+BLOQUEIO_LOGIN_MINUTOS = 15
 _SALT_FANTASMA = "0" * 32  # usado só pra gastar o mesmo tempo de CPU quando o usuário não existe
 
 NIVEIS_CRIAVEIS = ("basico", "intermediario", "plus")  # "admin" só existe via bootstrap
 
-# Preço aproximado de um modelo Claude classe Sonnet (USD por milhão de
-# tokens) - usado só pra estimar o gasto do chat contra o orçamento diário
-# de cada nível, não precisa bater centavo a centavo com a fatura real.
-_PRECO_ENTRADA_POR_MTOK_USD = 3.0
-_PRECO_SAIDA_POR_MTOK_USD = 15.0
+# Preço do modelo Claude realmente usado pelo Copiloto (ver
+# ai/claude_chat.py: MODELO, claude-sonnet-5) - USD por milhão de tokens,
+# usado só pra estimar o gasto do chat contra o orçamento diário de cada
+# nível. Ajuste junto se ATLAS_CLAUDE_MODEL mudar de modelo/tier - preços
+# desatualizados fazem o usuário bater no limite diário mais cedo (ou
+# tarde) do que o custo real justifica.
+_PRECO_ENTRADA_POR_MTOK_USD = 2.0
+_PRECO_SAIDA_POR_MTOK_USD = 10.0
 
 LIMITES_NIVEL = {
     "basico": {"chat": False, "chatUsdDia": 0.0, "pareceresPostsSemana": 10},
@@ -89,6 +99,35 @@ def verificar_login(usuario: str, senha: str) -> bool:
         return False
     senha_hash = _hash_senha(senha, credencial["senhaSalt"])
     return secrets.compare_digest(credencial["senhaHash"], senha_hash)
+
+
+def verificar_bloqueio_login(usuario: str) -> int | None:
+    """Minutos restantes de bloqueio por excesso de tentativas erradas, ou
+    None se pode tentar normalmente. Chame ANTES de verificar_login."""
+    tentativa = app_db.obter_tentativa_login(usuario)
+    bloqueado_ate = tentativa["bloqueadoAte"]
+    if not bloqueado_ate:
+        return None
+    restante = datetime.strptime(bloqueado_ate, "%Y-%m-%dT%H:%M:%S") - datetime.now()
+    if restante.total_seconds() <= 0:
+        return None
+    return max(1, round(restante.total_seconds() / 60))
+
+
+def registrar_tentativa_login(usuario: str, sucesso: bool) -> None:
+    """Chame depois de verificar_login - sucesso limpa o contador; falha
+    incrementa e bloqueia temporariamente ao atingir LIMITE_FALHAS_LOGIN."""
+    usuario = usuario.strip()
+    if sucesso:
+        app_db.limpar_tentativas_login(usuario)
+        return
+    falhas = app_db.obter_tentativa_login(usuario)["falhas"] + 1
+    bloqueado_ate = None
+    if falhas >= LIMITE_FALHAS_LOGIN:
+        bloqueado_ate = (datetime.now() + timedelta(minutes=BLOQUEIO_LOGIN_MINUTOS)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+    app_db.registrar_falha_login(usuario, falhas, bloqueado_ate)
 
 
 def criar_sessao(usuario: str) -> str:

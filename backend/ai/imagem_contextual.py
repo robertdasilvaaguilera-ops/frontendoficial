@@ -133,8 +133,10 @@ def _contexto_visual(decisao: dict) -> str:
         f"{str(decisao.get('ementa') or '')[:600]}"
     )
     try:
+        # effort="low": só escolhe 2-4 palavras-chave em inglês pra busca de
+        # imagem - tarefa mecânica, não precisa de raciocínio profundo.
         termo = chamar(
-            _SYSTEM_PROMPT_CONTEXTO, [{"role": "user", "content": tema}], max_tokens=30
+            _SYSTEM_PROMPT_CONTEXTO, [{"role": "user", "content": tema}], max_tokens=30, effort="low"
         )
         termo = re.sub(r"[\"'.]", "", termo).strip()
         return termo or "law office justice professional"

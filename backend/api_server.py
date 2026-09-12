@@ -33,6 +33,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+from PIL import Image
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -237,8 +238,16 @@ def auth_setup(req: SetupRequest):
 @app.post("/auth/login")
 def auth_login(req: LoginRequest):
     usuario = req.usuario.strip()
+    minutos_bloqueado = auth.verificar_bloqueio_login(usuario)
+    if minutos_bloqueado is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Muitas tentativas incorretas. Tente novamente em {minutos_bloqueado} min.",
+        )
     if not auth.verificar_login(usuario, req.senha):
+        auth.registrar_tentativa_login(usuario, sucesso=False)
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+    auth.registrar_tentativa_login(usuario, sucesso=True)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
     _definir_cookie_sessao(resposta, token)
@@ -1256,6 +1265,32 @@ async def admin_restaurar_decisoes_backup(
 
 _HEX_COR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
+# Contraste mínimo (razão WCAG) pra evitar salvar uma identidade ilegível -
+# o texto marcado é sempre escuro (social_render.COR_TEXTO_SOBRE_DESTAQUE),
+# então a cor de destaque precisa ser clara/vibrante o bastante contra ele
+# e contra o fundo escuro (senão o grifo "desaparece").
+_CONTRASTE_MIN_DESTAQUE_TEXTO = 2.2
+_CONTRASTE_MIN_DESTAQUE_FUNDO = 1.4
+
+
+def _validar_contraste_destaque(cor_destaque_hex: str, cor_fundo_escuro_hex: str) -> None:
+    cor_destaque = social_render.hex_para_rgb(cor_destaque_hex, social_render.MARCA_PADRAO.cor_destaque)
+    cor_fundo = social_render.hex_para_rgb(cor_fundo_escuro_hex, social_render.MARCA_PADRAO.cor_fundo_escuro)
+    contraste_texto = social_render.razao_contraste(cor_destaque, social_render.COR_TEXTO_SOBRE_DESTAQUE)
+    contraste_fundo = social_render.razao_contraste(cor_destaque, cor_fundo)
+    if contraste_texto < _CONTRASTE_MIN_DESTAQUE_TEXTO:
+        raise HTTPException(
+            status_code=400,
+            detail="Cor de destaque muito escura - o texto grifado (sempre escuro) ficaria "
+                   "difícil de ler. Escolha uma cor mais clara ou vibrante.",
+        )
+    if contraste_fundo < _CONTRASTE_MIN_DESTAQUE_FUNDO:
+        raise HTTPException(
+            status_code=400,
+            detail="Cor de destaque muito parecida com o fundo escuro - o grifo ficaria quase "
+                   "invisível. Escolha uma cor com mais contraste.",
+        )
+
 
 class SocialConfigRequest(BaseModel):
     ativo: bool | None = None
@@ -1312,6 +1347,12 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
             raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
     if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
         raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
+    if req.corDestaque is not None or req.corFundoEscuro is not None:
+        atual = app_db.obter_social_config()
+        _validar_contraste_destaque(
+            req.corDestaque if req.corDestaque is not None else atual["corDestaque"],
+            req.corFundoEscuro if req.corFundoEscuro is not None else atual["corFundoEscuro"],
+        )
     dados = req.model_dump(exclude_unset=True)
     # campo vazio no form de token não deve apagar o token já salvo -
     # só atualiza se o usuário realmente digitou um novo.
@@ -1355,16 +1396,43 @@ _EXTENSOES_IMAGEM = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".
 _TAMANHO_MAX_IMAGEM = 5 * 1024 * 1024
 
 
-async def _salvar_imagem_upload(arquivo: UploadFile, prefixo: str) -> str:
-    """Valida tipo/tamanho e grava no volume persistente (PASTA_IMAGENS,
-    servido publicamente por /social/imagem/{nome}) - usado tanto pelo logo
-    quanto pelos fundos customizados. Devolve o nome do arquivo salvo."""
+async def _salvar_imagem_upload(
+    arquivo: UploadFile, prefixo: str, resolucao_minima: tuple[int, int] | None = None
+) -> str:
+    """Valida tipo/tamanho/resolução e grava no volume persistente
+    (PASTA_IMAGENS, servido publicamente por /social/imagem/{nome}) - usado
+    tanto pelo logo quanto pelos fundos customizados. Devolve o nome do
+    arquivo salvo.
+
+    resolucao_minima: (largura, altura) mínima aceita - protege contra uma
+    imagem pequena demais ficar borrada quando esticada pro post (o fundo
+    cobre 1080x1350 inteiro; o logo é menos sensível, por isso só o fundo
+    passa esse parâmetro)."""
     extensao = _EXTENSOES_IMAGEM.get(arquivo.content_type)
     if not extensao:
         raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
     conteudo = await arquivo.read()
     if len(conteudo) > _TAMANHO_MAX_IMAGEM:
         raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 5MB)")
+    # O content-type acima vem do navegador (o cliente escolhe o valor, não
+    # é confiável sozinho) - decodificar de verdade confirma que os bytes
+    # são mesmo uma imagem válida antes de gravar no volume e servir
+    # publicamente em /social/imagem/{nome}.
+    try:
+        with Image.open(io.BytesIO(conteudo)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(conteudo)) as img:
+            largura, altura = img.size
+    except Exception:
+        raise HTTPException(status_code=400, detail="Não consegui ler essa imagem - arquivo corrompido?")
+    if resolucao_minima:
+        min_largura, min_altura = resolucao_minima
+        if largura < min_largura or altura < min_altura:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Imagem muito pequena ({largura}x{altura}px) - envie pelo menos "
+                       f"{min_largura}x{min_altura}px pra não ficar borrada no post.",
+            )
     nome_arquivo = f"{prefixo}_{uuid.uuid4().hex}{extensao}"
     with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
         f.write(conteudo)
@@ -1399,7 +1467,9 @@ async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile =
     _exigir_admin(request)
     if slide not in (1, 2):
         raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
-    nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}")
+    # o fundo cobre a imagem 1080x1350 inteira (ver render._fundo_slide) -
+    # abaixo de ~2/3 disso ele fica visivelmente esticado/borrado.
+    nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}", resolucao_minima=(720, 900))
     config = app_db.salvar_social_config({f"fundo{slide}Path": nome_arquivo})
     return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
 

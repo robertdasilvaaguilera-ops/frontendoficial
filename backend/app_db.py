@@ -81,6 +81,16 @@ def iniciar():
             expira_em TEXT
         )
     """)
+    # Trava de força bruta no login (ver auth.py: registrar_falha_login /
+    # bloqueado_ate) - por usuário tentado, não por IP (protege a conta
+    # mesmo contra tentativas vindas de vários IPs).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tentativa_login (
+            usuario TEXT PRIMARY KEY,
+            falhas INTEGER NOT NULL DEFAULT 0,
+            bloqueado_ate TEXT
+        )
+    """)
     # Cota semanal combinada de pareceres + posts gerados (reseta por
     # semana ISO, ex: "2026-W33") e gasto diário do chat em USD (reseta
     # por dia, ex: "2026-08-12") - ambos por usuário, ambos ignorados pra
@@ -220,6 +230,10 @@ def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
         "fundo1_path": "''",
         "fundo2_path": "''",
     }
+    # f-string aqui é seguro: coluna/default vêm só do dict fixo acima
+    # (nunca de entrada externa) - e nomes de coluna não dá pra parametrizar
+    # com "?" de qualquer forma (só valores), então não tem como escrever
+    # isso com placeholder mesmo se quisesse.
     for coluna, default in novas_texto.items():
         if coluna not in colunas:
             conn.execute(f"ALTER TABLE social_config ADD COLUMN {coluna} TEXT NOT NULL DEFAULT {default}")
@@ -415,6 +429,39 @@ def obter_credencial(usuario: str) -> dict | None:
         "senhaSalt": linha["senha_salt"],
         "nivel": linha["nivel"],
     }
+
+
+# --- trava de força bruta no login (ver auth.py) -----------------------
+
+def obter_tentativa_login(usuario: str) -> dict:
+    conn = _conectar()
+    linha = conn.execute(
+        "SELECT * FROM tentativa_login WHERE usuario = ?", (usuario.strip(),)
+    ).fetchone()
+    conn.close()
+    if not linha:
+        return {"falhas": 0, "bloqueadoAte": None}
+    return {"falhas": linha["falhas"], "bloqueadoAte": linha["bloqueado_ate"]}
+
+
+def registrar_falha_login(usuario: str, falhas: int, bloqueado_ate: str | None) -> None:
+    conn = _conectar()
+    conn.execute(
+        """
+        INSERT INTO tentativa_login (usuario, falhas, bloqueado_ate) VALUES (?, ?, ?)
+        ON CONFLICT(usuario) DO UPDATE SET falhas = excluded.falhas, bloqueado_ate = excluded.bloqueado_ate
+        """,
+        (usuario.strip(), falhas, bloqueado_ate),
+    )
+    conn.commit()
+    conn.close()
+
+
+def limpar_tentativas_login(usuario: str) -> None:
+    conn = _conectar()
+    conn.execute("DELETE FROM tentativa_login WHERE usuario = ?", (usuario.strip(),))
+    conn.commit()
+    conn.close()
 
 
 def obter_nivel(usuario: str) -> str | None:

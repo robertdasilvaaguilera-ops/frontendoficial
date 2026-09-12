@@ -141,10 +141,15 @@ def gerar_identidade_visual(descricao: str) -> dict:
     estilo tipográfico curado) - usado pelo botão "Gerar com IA" na aba
     Mídia Social. Nunca publica nem salva nada sozinho - só sugere valores
     pro formulário, que o usuário ainda revisa/ajusta antes de salvar."""
+    # effort="low": mapeia texto -> paleta/estilo de uma lista fechada de
+    # opções (enum + hex) - tarefa estruturada, não precisa de raciocínio
+    # profundo (diferente de escolher_e_escrever, que escreve o conteúdo
+    # real do post e fica no padrão do modelo de propósito).
     bruto = chamar(
         SYSTEM_PROMPT_IDENTIDADE,
         [{"role": "user", "content": descricao.strip()}],
         max_tokens=300,
+        effort="low",
     )
     dados = _extrair_json(bruto)
     estilo = dados.get("estilo") if dados.get("estilo") in ("classico", "editorial", "moderno") else "classico"
