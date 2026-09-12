@@ -84,6 +84,14 @@ def criar_usuario(usuario: str, senha: str, nivel: str) -> None:
     app_db.criar_usuario(usuario.strip(), senha_hash, salt, nivel)
 
 
+def registrar_aceite_termos(usuario: str) -> None:
+    """Registra quando esta conta aceitou os Termos de Uso/Política de
+    Privacidade (ver /auth/registro) - fica só como registro/auditoria, o
+    acesso em si não depende disso (contas criadas pelo admin pra equipe,
+    antes de existir cadastro aberto, nunca passam por aqui)."""
+    app_db.registrar_aceite_termos(usuario)
+
+
 def listar_usuarios() -> list[dict]:
     return app_db.listar_usuarios()
 

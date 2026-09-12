@@ -68,7 +68,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   }
 }
 
-async function postAuth(path: string, body: Record<string, string>): Promise<void> {
+async function postAuth(path: string, body: Record<string, string | boolean>): Promise<void> {
   if (!API_URL) precisaDeApi();
   const r = await fetch(`${API_URL}${path}`, {
     method: "POST",
@@ -88,6 +88,13 @@ export function setupAuth(usuario: string, senha: string): Promise<void> {
 
 export function loginAuth(usuario: string, senha: string): Promise<void> {
   return postAuth("/auth/login", { usuario, senha });
+}
+
+// Cadastro aberto: qualquer pessoa cria a própria conta (nível básico),
+// sem precisar que o admin crie o login antes - ver /auth/registro no
+// backend. Diferente de setupAuth (só existe uma vez, cria o dono/admin).
+export function registrarAuth(usuario: string, senha: string, aceitouTermos: boolean): Promise<void> {
+  return postAuth("/auth/registro", { usuario, senha, aceitouTermos });
 }
 
 export async function logoutAuth(): Promise<void> {

@@ -82,7 +82,7 @@ app_db.iniciar()
 # checar status, sair - sair não pode dar 401 achando "sessão inválida" pra
 # quem já está deslogado), e a raiz (só devolve a lista de endpoints, sem
 # dado nenhum do usuário).
-_ROTAS_PUBLICAS = {"/", "/auth/status", "/auth/setup", "/auth/login", "/auth/logout"}
+_ROTAS_PUBLICAS = {"/", "/auth/status", "/auth/setup", "/auth/registro", "/auth/login", "/auth/logout"}
 # Cookie de sessão entre origens diferentes (front e backend em subdomínios
 # distintos do Railway) só é enviado pelo navegador em fetch/XHR com
 # SameSite=None + Secure - "Lax" (o padrão de dev, front e back em
@@ -154,6 +154,12 @@ class NovoUsuarioRequest(BaseModel):
     usuario: str
     senha: str
     nivel: str
+
+
+class RegistroRequest(BaseModel):
+    usuario: str
+    senha: str
+    aceitouTermos: bool = False
 
 
 def _validar_usuario_senha(usuario: str, senha: str) -> str:
@@ -239,6 +245,34 @@ def auth_setup(req: SetupRequest):
         raise HTTPException(status_code=409, detail="Já existe um usuário configurado")
     usuario = _validar_usuario_senha(req.usuario, req.senha)
     auth.criar_primeiro_usuario(usuario, req.senha)
+    token = auth.criar_sessao(usuario)
+    resposta = JSONResponse({"ok": True})
+    _definir_cookie_sessao(resposta, token)
+    return resposta
+
+
+@app.post("/auth/registro")
+def auth_registrar(req: RegistroRequest):
+    """Cadastro aberto: qualquer pessoa cria a própria conta, sem precisar
+    de um admin criando o login antes (diferente de /auth/setup, que só
+    existe uma vez e cria o dono, e de /auth/users, exclusivo do admin para
+    a própria equipe). Todo cadastro público nasce nível "básico" - não dá
+    pra se autopromover a admin/intermediário/plus por aqui; upgrade de
+    nível continua sendo o admin mudando manualmente (ver /auth/users)."""
+    if not auth.esta_configurado():
+        raise HTTPException(
+            status_code=409, detail="O ATLAS ainda não tem o primeiro acesso configurado"
+        )
+    if not req.aceitouTermos:
+        raise HTTPException(
+            status_code=400,
+            detail="É necessário aceitar os Termos de Uso e a Política de Privacidade",
+        )
+    usuario = _validar_usuario_senha(req.usuario, req.senha)
+    if any(u["usuario"] == usuario for u in auth.listar_usuarios()):
+        raise HTTPException(status_code=409, detail="Já existe uma conta com esse usuário")
+    auth.criar_usuario(usuario, req.senha, "basico")
+    auth.registrar_aceite_termos(usuario)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
     _definir_cookie_sessao(resposta, token)

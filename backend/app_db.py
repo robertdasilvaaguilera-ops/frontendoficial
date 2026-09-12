@@ -62,17 +62,22 @@ def iniciar():
             atualizado_em TEXT
         )
     """)
-    # Login local multiusuário - cada login (usuário/senha) é criado pelo
-    # dono do ATLAS na tela "Usuários", não por cadastro aberto. Ver auth.py.
+    # Login local - cada login (usuário/senha) é criado pelo dono do ATLAS
+    # na tela "Usuários" (equipe) OU pelo próprio cadastro aberto em
+    # /auth/registro (nível sempre "basico" nesse caso). Ver auth.py.
     # "nivel" controla o que a pessoa pode fazer no app (admin/basico/
-    # intermediario/plus) - ver LIMITES_NIVEL em auth.py.
+    # intermediario/plus) - ver LIMITES_NIVEL em auth.py. termos_aceitos_em
+    # só é preenchido por quem passou pelo cadastro aberto (aceite
+    # explícito dos Termos de Uso/Política de Privacidade); contas criadas
+    # manualmente pelo admin pra equipe não passam por essa tela.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS credencial (
             usuario TEXT PRIMARY KEY,
             senha_hash TEXT NOT NULL,
             senha_salt TEXT NOT NULL,
             nivel TEXT NOT NULL DEFAULT 'basico',
-            criado_em TEXT
+            criado_em TEXT,
+            termos_aceitos_em TEXT
         )
     """)
     conn.execute("""
@@ -175,6 +180,7 @@ def iniciar():
     """)
     conn.commit()
     _migrar_credenciais_legado(conn)
+    _migrar_credencial_termos(conn)
     _migrar_social_config_marca(conn)
     _migrar_clientes_dono(conn)
     _migrar_conversas_dono(conn)
@@ -232,6 +238,16 @@ def _migrar_credenciais_legado(conn: sqlite3.Connection) -> None:
             )
         """)
     conn.commit()
+
+
+def _migrar_credencial_termos(conn: sqlite3.Connection) -> None:
+    """Bancos de antes do cadastro aberto existir não têm a coluna de
+    aceite dos Termos de Uso/Política de Privacidade - só passa a existir
+    daqui pra frente, pra quem se cadastrar sozinho (ver /auth/registro)."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(credencial)")}
+    if "termos_aceitos_em" not in colunas:
+        conn.execute("ALTER TABLE credencial ADD COLUMN termos_aceitos_em TEXT")
+        conn.commit()
 
 
 def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
@@ -672,6 +688,16 @@ def criar_usuario(usuario: str, senha_hash: str, senha_salt: str, nivel: str) ->
     conn.execute(
         "INSERT INTO credencial (usuario, senha_hash, senha_salt, nivel, criado_em) VALUES (?, ?, ?, ?, ?)",
         (usuario.strip(), senha_hash, senha_salt, nivel, agora),
+    )
+    conn.commit()
+    conn.close()
+
+
+def registrar_aceite_termos(usuario: str) -> None:
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        "UPDATE credencial SET termos_aceitos_em = ? WHERE usuario = ?", (agora, usuario.strip())
     )
     conn.commit()
     conn.close()
