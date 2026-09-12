@@ -1,14 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   CheckCircle2,
+  Eye,
   ExternalLink,
   Loader2,
   Plus,
   Radio,
   ShieldAlert,
   Trash2,
+  UploadCloud,
   Wand2,
   XCircle,
 } from "lucide-react";
@@ -19,6 +21,9 @@ import {
   testarConexaoInstagram,
   publicarAgora,
   imagemSocialUrl,
+  subirLogo,
+  removerLogo,
+  gerarPreview,
   type SocialConfig,
   type SocialPost,
 } from "@/lib/social-api";
@@ -81,6 +86,17 @@ function MidiaSocialAdmin() {
   const [igToken, setIgToken] = useState("");
   const [igContaId, setIgContaId] = useState(config.igBusinessAccountId);
 
+  const [marcaNome, setMarcaNome] = useState(config.marcaNome);
+  const [marcaHandle, setMarcaHandle] = useState(config.marcaHandle);
+  const [corFundoClaro, setCorFundoClaro] = useState(config.corFundoClaro);
+  const [corFundoEscuro, setCorFundoEscuro] = useState(config.corFundoEscuro);
+  const [corDestaque, setCorDestaque] = useState(config.corDestaque);
+  const [logoPath, setLogoPath] = useState(config.logoPath);
+  const logoInputRef = useRef<HTMLInputElement>(null);
+  const [enviandoLogo, setEnviandoLogo] = useState(false);
+  const [gerandoPreview, setGerandoPreview] = useState(false);
+  const [preview, setPreview] = useState<{ img1: string; img2: string } | null>(null);
+
   const [salvando, setSalvando] = useState(false);
   const [testando, setTestando] = useState(false);
   const [publicando, setPublicando] = useState(false);
@@ -132,15 +148,73 @@ function MidiaSocialAdmin() {
         ativo,
         igAccessToken: igToken.trim() || undefined,
         igBusinessAccountId: igContaId.trim(),
+        marcaNome: marcaNome.trim() || "ATLAS",
+        marcaHandle: marcaHandle.trim() || "@atlas.tributos",
+        corFundoClaro,
+        corFundoEscuro,
+        corDestaque,
       });
       setIgToken("");
       setIgContaId(salvo.igBusinessAccountId);
+      setMarcaNome(salvo.marcaNome);
+      setMarcaHandle(salvo.marcaHandle);
+      setCorFundoClaro(salvo.corFundoClaro);
+      setCorFundoEscuro(salvo.corFundoEscuro);
+      setCorDestaque(salvo.corDestaque);
       await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
       setSucesso("Configuração salva.");
     } catch (err) {
       setErro(err instanceof Error ? err.message : "Não consegui salvar a configuração agora.");
     } finally {
       setSalvando(false);
+    }
+  }
+
+  async function enviarLogo() {
+    const arquivo = logoInputRef.current?.files?.[0];
+    if (!arquivo) return;
+    setEnviandoLogo(true);
+    setErro(null);
+    try {
+      const r = await subirLogo(arquivo);
+      setLogoPath(r.logoPath);
+      await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
+      if (logoInputRef.current) logoInputRef.current.value = "";
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui enviar o logo agora.");
+    } finally {
+      setEnviandoLogo(false);
+    }
+  }
+
+  async function apagarLogo() {
+    setEnviandoLogo(true);
+    setErro(null);
+    try {
+      await removerLogo();
+      setLogoPath("");
+      await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui remover o logo agora.");
+    } finally {
+      setEnviandoLogo(false);
+    }
+  }
+
+  async function visualizarPreview() {
+    setGerandoPreview(true);
+    setErro(null);
+    try {
+      const r = await gerarPreview({ marcaNome, marcaHandle, corFundoClaro, corFundoEscuro, corDestaque });
+      const cacheBuster = `?t=${Date.now()}`;
+      setPreview({
+        img1: `${imagemSocialUrl(r.imagem1Path)}${cacheBuster}`,
+        img2: `${imagemSocialUrl(r.imagem2Path)}${cacheBuster}`,
+      });
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui gerar a prévia agora.");
+    } finally {
+      setGerandoPreview(false);
     }
   }
 
@@ -255,6 +329,158 @@ function MidiaSocialAdmin() {
               <XCircle className="h-3.5 w-3.5" />
               {testeResultado.mensagem}
             </span>
+          )}
+        </div>
+      </section>
+
+      {/* Identidade visual */}
+      <section className="mt-6 surface rounded-lg p-5">
+        <h2 className="text-sm font-semibold">Identidade visual do post</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Nome, @handle, cores e logo que aparecem nas imagens geradas - personalize pra usar com
+          outro escritório ou marca além do perfil original da Atlas.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Nome da marca
+            </label>
+            <input
+              value={marcaNome}
+              onChange={(e) => setMarcaNome(e.target.value)}
+              placeholder="Ex: Silva & Associados"
+              className="mt-1 w-full rounded-md bg-background border border-border px-3 py-2 text-sm outline-none focus:border-primary"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              @ do Instagram (exibido na imagem)
+            </label>
+            <input
+              value={marcaHandle}
+              onChange={(e) => setMarcaHandle(e.target.value)}
+              placeholder="Ex: @silva.tributario"
+              className="mt-1 w-full rounded-md bg-background border border-border px-3 py-2 text-sm outline-none focus:border-primary"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Cor de destaque (grifo)
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="color"
+                value={corDestaque}
+                onChange={(e) => setCorDestaque(e.target.value)}
+                className="h-9 w-11 rounded-md border border-border bg-background cursor-pointer"
+              />
+              <input
+                value={corDestaque}
+                onChange={(e) => setCorDestaque(e.target.value)}
+                className="w-full rounded-md bg-background border border-border px-2.5 py-2 text-xs font-mono outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Fundo (claro do degradê)
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="color"
+                value={corFundoClaro}
+                onChange={(e) => setCorFundoClaro(e.target.value)}
+                className="h-9 w-11 rounded-md border border-border bg-background cursor-pointer"
+              />
+              <input
+                value={corFundoClaro}
+                onChange={(e) => setCorFundoClaro(e.target.value)}
+                className="w-full rounded-md bg-background border border-border px-2.5 py-2 text-xs font-mono outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Fundo (escuro do degradê)
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="color"
+                value={corFundoEscuro}
+                onChange={(e) => setCorFundoEscuro(e.target.value)}
+                className="h-9 w-11 rounded-md border border-border bg-background cursor-pointer"
+              />
+              <input
+                value={corFundoEscuro}
+                onChange={(e) => setCorFundoEscuro(e.target.value)}
+                className="w-full rounded-md bg-background border border-border px-2.5 py-2 text-xs font-mono outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+            Logo (opcional - substitui o nome em texto no rodapé da imagem)
+          </label>
+          <div className="mt-1.5 flex flex-wrap items-center gap-3">
+            {logoPath && (
+              <img
+                src={`${imagemSocialUrl(logoPath)}?v=${logoPath}`}
+                alt="Logo atual"
+                className="h-10 max-w-[140px] object-contain rounded border border-border bg-black/20 px-2"
+              />
+            )}
+            <input
+              ref={logoInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={enviandoLogo}
+              className="text-xs text-muted-foreground file:mr-2 file:rounded-md file:border-0 file:bg-accent file:px-3 file:py-1.5 file:text-xs file:font-medium"
+            />
+            <button
+              onClick={enviarLogo}
+              disabled={enviandoLogo}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/40 disabled:opacity-50"
+            >
+              {enviandoLogo ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+              Enviar
+            </button>
+            {logoPath && (
+              <button
+                onClick={apagarLogo}
+                disabled={enviandoLogo}
+                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-risk hover:bg-risk/10 disabled:opacity-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Remover
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <button
+            onClick={visualizarPreview}
+            disabled={gerandoPreview}
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/40 disabled:opacity-50"
+          >
+            {gerandoPreview ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+            Gerar prévia
+          </button>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Renderiza as duas imagens com um texto de exemplo e a identidade acima (mesmo sem
+            salvar ainda) - não usa Claude nem publica nada.
+          </p>
+          {preview && (
+            <div className="mt-3 flex flex-wrap gap-4">
+              <img src={preview.img1} alt="Prévia imagem 1" className="w-40 rounded-md border border-border" />
+              <img src={preview.img2} alt="Prévia imagem 2" className="w-40 rounded-md border border-border" />
+            </div>
           )}
         </div>
       </section>

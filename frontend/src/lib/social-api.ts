@@ -20,6 +20,14 @@ export interface SocialConfig {
   igAccessToken: string; // sempre mascarado quando vem do backend (ex: "EAAB••••6789")
   igBusinessAccountId: string;
   temToken: boolean;
+  // Identidade visual do post (ver social/render.py) - cada perfil define a
+  // própria, ao comercializar o ATLAS pra outros escritórios/advogados.
+  marcaNome: string;
+  marcaHandle: string;
+  corFundoClaro: string; // hex #RRGGBB
+  corFundoEscuro: string; // hex #RRGGBB
+  corDestaque: string; // hex #RRGGBB - cor do grifo/detalhes
+  logoPath: string; // nome do arquivo em /social/imagem/{logoPath}, ou "" sem logo
 }
 
 export interface SocialConfigInput {
@@ -30,6 +38,11 @@ export interface SocialConfigInput {
   horarios?: string[];
   igAccessToken?: string; // deixe vazio para manter o token já salvo
   igBusinessAccountId?: string;
+  marcaNome?: string;
+  marcaHandle?: string;
+  corFundoClaro?: string;
+  corFundoEscuro?: string;
+  corDestaque?: string;
 }
 
 export async function getSocialConfig(): Promise<SocialConfig> {
@@ -121,6 +134,48 @@ export async function publicarAgora(): Promise<SocialPost> {
 export function imagemSocialUrl(nome: string | null): string | null {
   if (!API_URL || !nome) return null;
   return `${API_URL}/social/imagem/${nome}`;
+}
+
+export async function subirLogo(arquivo: File): Promise<{ logoPath: string }> {
+  if (!API_URL) precisaDeApi();
+  const form = new FormData();
+  form.append("arquivo", arquivo);
+  const r = await fetch(`${API_URL}/social/logo`, { method: "POST", body: form, credentials: "include" });
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.detail || `Falha ao enviar logo (HTTP ${r.status})`);
+  return body as { logoPath: string };
+}
+
+export async function removerLogo(): Promise<void> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/social/logo`, { method: "DELETE", credentials: "include" });
+  if (!r.ok) throw new Error(`Falha ao remover logo (HTTP ${r.status})`);
+}
+
+export interface SocialPreviewInput {
+  marcaNome?: string;
+  marcaHandle?: string;
+  corFundoClaro?: string;
+  corFundoEscuro?: string;
+  corDestaque?: string;
+}
+
+export interface SocialPreviewResultado {
+  imagem1Path: string;
+  imagem2Path: string;
+}
+
+export async function gerarPreview(input: SocialPreviewInput): Promise<SocialPreviewResultado> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/social/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    credentials: "include",
+  });
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.detail || `Falha ao gerar preview (HTTP ${r.status})`);
+  return body as SocialPreviewResultado;
 }
 
 export const socialConfigQuery = queryOptions({

@@ -25,9 +25,9 @@ _GANCHOS = [
     "Vale a pena checar.",
 ]
 
-SYSTEM_PROMPT = """Você escreve o conteúdo do post diário automático de Instagram de uma \
-plataforma de inteligência jurídico-tributária brasileira, a partir de decisões reais \
-(CARF, STF, STJ, TRFs etc.) coletadas pelo sistema.
+SYSTEM_PROMPT_TEMPLATE = """Você escreve o conteúdo do post diário automático de Instagram do \
+perfil "__MARCA_NOME__", uma plataforma/escritório de inteligência jurídico-tributária \
+brasileira, a partir de decisões reais (CARF, STF, STJ, TRFs etc.) coletadas pelo sistema.
 
 Você recebe uma lista de decisões candidatas (ainda não usadas) e as preferências \
 configuradas pelo usuário para este perfil. Sua tarefa em duas partes:
@@ -78,8 +78,8 @@ Regras de conteúdo:
    máximo ~45 caracteres, cabendo em uma linha.
 3. "sub2": 1 frase curta dizendo que a análise foi gerada e publicada automaticamente pelo
    sistema a partir da decisão real do dia (pode mencionar o tema brevemente). Envolva a
-   parte que credita a autoria (ex: "gerada e publicada automaticamente pela Atlas") com
-   `§§...§§` - vira um grifo dourado na imagem. Use no máximo esse 1 trecho marcado. Nunca
+   parte que credita a autoria (ex: "gerada e publicada automaticamente pela __MARCA_NOME__") com
+   `§§...§§` - vira um grifo na imagem. Use no máximo esse 1 trecho marcado. Nunca
    escreva "julgada hoje" a menos que a data de julgamento seja mesmo hoje.
 4. "legenda": tom técnico-acessível descrito acima. Abre com uma frase de impacto sobre a
    decisão (sem emoji obrigatório - só use emoji se o tom configurado pedir algo mais
@@ -122,15 +122,22 @@ def escolher_e_escrever(
     objetivos: str | None = None,
     tom: str | None = None,
     ganchos_recentes: list[str] | None = None,
+    marca_nome: str = "ATLAS",
 ) -> dict | None:
     """
     decisoes: candidatas (ver formato de /automacao/decisoes-recentes), já
         SEM as que estão em ids_usados (o chamador filtra antes).
+    marca_nome: nome do perfil configurado em Mídia Social (ver
+        social_config) - usado na autoria do sub2 e no enquadramento do
+        prompt. Não usa str.format porque o restante do prompt tem chaves
+        JSON literais (o schema de resposta).
     Devolve None se a IA decidir que nenhuma decisão qualifica, ou o dict
     {"decisaoId", "paragrafoDestaque", "headline2", "sub2", "legenda"}.
     """
     if not decisoes:
         return None
+
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.replace("__MARCA_NOME__", marca_nome or "ATLAS")
 
     partes = [f"DECISÕES CANDIDATAS:\n\n{_formatar_decisoes(decisoes)}"]
     if temas:
@@ -147,12 +154,12 @@ def escolher_e_escrever(
     partes.append("Escreva o JSON com a decisão escolhida e os textos do post.")
     conteudo = "\n\n".join(partes)
 
-    bruto = chamar(SYSTEM_PROMPT, [{"role": "user", "content": conteudo}], max_tokens=1500)
+    bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=1500)
 
     try:
         dados = _extrair_json(bruto)
     except (ValueError, json.JSONDecodeError):
-        bruto = chamar(SYSTEM_PROMPT, [{"role": "user", "content": conteudo}], max_tokens=2200)
+        bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=2200)
         dados = _extrair_json(bruto)  # deixa propagar se falhar de novo - chamador decide
 
     decisao_id = dados.get("decisao_id")

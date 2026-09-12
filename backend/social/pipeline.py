@@ -44,6 +44,25 @@ def _url_publica_imagem(nome_arquivo: str) -> str:
     return f"{URL_BASE_PUBLICA}/social/imagem/{nome_arquivo}"
 
 
+def marca_da_config(config: dict) -> render.Marca:
+    """Monta a identidade visual (`render.Marca`) a partir da configuração
+    salva pelo usuário na aba Mídia Social - cada perfil tem seu próprio
+    nome, @handle, cores e logo (ver /social/config e /social/logo)."""
+    logo_path = None
+    if config.get("logoPath"):
+        caminho = os.path.join(PASTA_IMAGENS, config["logoPath"])
+        if os.path.isfile(caminho):
+            logo_path = caminho
+    return render.Marca(
+        nome=config.get("marcaNome") or "ATLAS",
+        handle=config.get("marcaHandle") or "@atlas.tributos",
+        cor_destaque=render.hex_para_rgb(config.get("corDestaque"), render.MARCA_PADRAO.cor_destaque),
+        cor_fundo_claro=render.hex_para_rgb(config.get("corFundoClaro"), render.MARCA_PADRAO.cor_fundo_claro),
+        cor_fundo_escuro=render.hex_para_rgb(config.get("corFundoEscuro"), render.MARCA_PADRAO.cor_fundo_escuro),
+        logo_path=logo_path,
+    )
+
+
 def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dict:
     """
     decisoes_candidatas: mesmo formato usado pelo antigo
@@ -83,6 +102,7 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
             objetivos=config["objetivos"],
             tom=config["tom"],
             ganchos_recentes=ganchos_recentes,
+            marca_nome=config["marcaNome"],
         )
     except Exception as e:  # erro de rede/parsing na chamada à Claude
         return app_db.inserir_social_post({
@@ -99,11 +119,12 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
     titulo = decisao.get("titulo", "") if decisao else ""
     gancho = _extrair_gancho(escolha["paragrafoDestaque"])
 
+    marca = marca_da_config(config)
     nome1, nome2 = f"{uuid.uuid4().hex}.png", f"{uuid.uuid4().hex}.png"
     caminho1, caminho2 = os.path.join(PASTA_IMAGENS, nome1), os.path.join(PASTA_IMAGENS, nome2)
     try:
-        render.render_slide1(escolha["paragrafoDestaque"], caminho1)
-        render.render_slide2(escolha["headline2"], escolha["sub2"], caminho2)
+        render.render_slide1(escolha["paragrafoDestaque"], caminho1, marca=marca)
+        render.render_slide2(escolha["headline2"], escolha["sub2"], caminho2, marca=marca)
     except Exception as e:
         return app_db.inserir_social_post({
             "status": "erro", "decisaoId": escolha["decisaoId"], "titulo": titulo,

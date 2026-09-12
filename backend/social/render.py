@@ -1,11 +1,17 @@
 """
 Renderizador server-side das duas imagens do post automático de Instagram
-(1080x1350 cada) - a mesma identidade visual validada manualmente (fundo
-azul-marinho em degradê radial, tipografia serifada Lora dourada/creme,
-destaque em `<mark>` dourado, rodapé de marca) - só que gerada com Pillow
-em vez de HTML + navegador, porque este backend não tem Node/Playwright e
-roda como serviço de longa duração no Railway (mais leve e mais robusto
-sem depender de um Chromium headless em produção).
+(1080x1350 cada) - a mesma identidade visual validada manualmente (fundo em
+degradê radial, tipografia serifada dourada/creme, destaque em `<mark>`,
+rodapé de marca) - só que gerada com Pillow em vez de HTML + navegador,
+porque este backend não tem Node/Playwright e roda como serviço de longa
+duração no Railway (mais leve e mais robusto sem depender de um Chromium
+headless em produção).
+
+Identidade visual configurável (`Marca`): cada escritório/perfil que usa a
+Mídia Social define seu próprio nome, @handle, cores e logo (ver
+/social/config) - os valores de MARCA_PADRAO abaixo são só o default (a
+identidade original da Atlas), usado quando o perfil ainda não configurou a
+própria marca.
 
 Convenção de destaque: o chamador usa `§§texto§§` para marcar os trechos
 que devem virar o grifo dourado (mesma convenção usada no resto da geração
@@ -16,7 +22,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -27,13 +33,11 @@ _FONTE_PLEX = os.path.join(_PASTA, "fonts", "IBMPlexSans-Variable.ttf")
 LARGURA = 1080
 ALTURA = 1350
 
-# Paleta - mesma do template HTML original (automacao/templates/slide{1,2}.html)
+# Cores fixas de texto (não fazem parte da identidade de marca - contraste
+# alto sobre qualquer fundo escuro segue funcionando bem).
 COR_TEXTO = (245, 241, 230)  # #F5F1E6
 COR_TEXTO_MUTED = (201, 196, 180)  # #C9C4B4
-COR_DOURADO = (217, 165, 68)  # #D9A544
-COR_TEXTO_SOBRE_DOURADO = (20, 21, 28)  # #14151C
-COR_GRAD_CLARO = (23, 27, 36)  # #171b24
-COR_GRAD_ESCURO = (11, 13, 18)  # #0B0D12
+COR_TEXTO_SOBRE_DESTAQUE = (20, 21, 28)  # #14151C
 
 # Padding horizontal/vertical do grifo dourado atrás de um trecho marcado -
 # equivalente ao `padding: 2px 8px` do CSS original. Diferente do CSS (onde
@@ -62,6 +66,37 @@ def _sem_emoji(texto: str) -> str:
     return re.sub(r"\s+", " ", _EMOJI_RE.sub("", texto)).strip()
 
 
+def hex_para_rgb(cor_hex: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    """`"#D9A544"` -> `(217, 165, 68)`. Cai no `default` se o valor vier
+    vazio/inválido (ex: cor ainda não configurada, ou digitada errado) - a
+    imagem sempre renderiza, nunca quebra por causa de uma cor ruim."""
+    if not cor_hex:
+        return default
+    s = cor_hex.strip().lstrip("#")
+    if len(s) != 6:
+        return default
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return default
+
+
+@dataclass
+class Marca:
+    """Identidade visual de um perfil da Mídia Social - tudo que varia de
+    escritório para escritório entre um post e outro (ver social_config no
+    banco). Os defaults abaixo reproduzem a identidade original da Atlas."""
+    nome: str = "ATLAS"
+    handle: str = "@ATLAS.TRIBUTOS"
+    cor_destaque: tuple[int, int, int] = field(default=(217, 165, 68))  # #D9A544
+    cor_fundo_claro: tuple[int, int, int] = field(default=(23, 27, 36))  # #171B24
+    cor_fundo_escuro: tuple[int, int, int] = field(default=(11, 13, 18))  # #0B0D12
+    logo_path: str | None = None  # caminho absoluto no disco, ou None
+
+
+MARCA_PADRAO = Marca()
+
+
 def _fonte(caminho: str, tamanho: int, peso: bytes = b"Regular") -> ImageFont.FreeTypeFont:
     fonte = ImageFont.truetype(caminho, tamanho)
     try:
@@ -71,7 +106,12 @@ def _fonte(caminho: str, tamanho: int, peso: bytes = b"Regular") -> ImageFont.Fr
     return fonte
 
 
-def _gradiente_radial(size: tuple[int, int], centro_pct: tuple[float, float]) -> Image.Image:
+def _gradiente_radial(
+    size: tuple[int, int],
+    centro_pct: tuple[float, float],
+    cor_clara: tuple[int, int, int],
+    cor_escura: tuple[int, int, int],
+) -> Image.Image:
     """Aproxima o `radial-gradient(circle at X% Y%, claro 0%, escuro 55%)`
     do CSS original: interpola claro->escuro conforme a distância do centro,
     saturando em escuro a partir de 55% do raio até o canto mais distante."""
@@ -89,9 +129,9 @@ def _gradiente_radial(size: tuple[int, int], centro_pct: tuple[float, float]) ->
             dx = x - cx
             d = math.hypot(dx, dy) / raio_max
             t = min(1.0, d / parada)
-            r = round(COR_GRAD_CLARO[0] + (COR_GRAD_ESCURO[0] - COR_GRAD_CLARO[0]) * t)
-            g = round(COR_GRAD_CLARO[1] + (COR_GRAD_ESCURO[1] - COR_GRAD_CLARO[1]) * t)
-            b = round(COR_GRAD_CLARO[2] + (COR_GRAD_ESCURO[2] - COR_GRAD_CLARO[2]) * t)
+            r = round(cor_clara[0] + (cor_escura[0] - cor_clara[0]) * t)
+            g = round(cor_clara[1] + (cor_escura[1] - cor_clara[1]) * t)
+            b = round(cor_clara[2] + (cor_escura[2] - cor_clara[2]) * t)
             px[x, y] = (r, g, b)
     return img
 
@@ -203,9 +243,10 @@ def _desenhar_linha_rica(
     y_baseline_normal: float,
     largura_canvas: int,
     cor_normal: tuple[int, int, int],
+    cor_destaque: tuple[int, int, int],
 ) -> None:
-    """Desenha uma linha centralizada, com grifo dourado atrás de cada
-    trecho contínuo marcado (equivalente ao `<mark>` +
+    """Desenha uma linha centralizada, com grifo na cor de destaque atrás de
+    cada trecho contínuo marcado (equivalente ao `<mark>` +
     `box-decoration-break: clone` do CSS). `y_baseline_normal` é a linha de
     base (baseline) do texto não-marcado - se a fonte marcada tiver tamanho
     diferente (caso do subtítulo do slide 2), o texto marcado é alinhado
@@ -218,7 +259,7 @@ def _desenhar_linha_rica(
     y_topo_normal = y_baseline_normal - ascent_normal
     y_topo_marc = y_baseline_normal - ascent_marc
 
-    # 1a passada: grifo dourado atrás de cada trecho contínuo marcado
+    # 1a passada: grifo na cor de destaque atrás de cada trecho contínuo marcado
     i = 0
     while i < len(linha):
         if linha[i].marcada:
@@ -230,7 +271,7 @@ def _desenhar_linha_rica(
             draw.rounded_rectangle(
                 [x_ini, y_topo_marc - PAD_V, x_fim, y_topo_marc + ascent_marc + PAD_V],
                 radius=8,
-                fill=COR_DOURADO,
+                fill=cor_destaque,
             )
             i = j
         else:
@@ -239,7 +280,7 @@ def _desenhar_linha_rica(
     # 2a passada: o texto por cima
     for i, p in enumerate(linha):
         if p.marcada:
-            draw.text((xs[i], y_topo_marc), p.texto, font=fonte_marcada, fill=COR_TEXTO_SOBRE_DOURADO)
+            draw.text((xs[i], y_topo_marc), p.texto, font=fonte_marcada, fill=COR_TEXTO_SOBRE_DESTAQUE)
         else:
             draw.text((xs[i], y_topo_normal), p.texto, font=fonte_normal, fill=cor_normal)
 
@@ -251,6 +292,7 @@ def _desenhar_paragrafo(
     y_topo: float,
     largura_canvas: int,
     line_height: float,
+    cor_destaque: tuple[int, int, int],
     cor_texto: tuple[int, int, int] = COR_TEXTO,
 ) -> float:
     """Desenha um parágrafo de várias linhas onde marcado/não-marcado usam a
@@ -259,40 +301,56 @@ def _desenhar_paragrafo(
     ascent, _ = fonte.getmetrics()
     y = y_topo
     for linha in linhas:
-        _desenhar_linha_rica(draw, linha, fonte, fonte, y + ascent, largura_canvas, cor_texto)
+        _desenhar_linha_rica(draw, linha, fonte, fonte, y + ascent, largura_canvas, cor_texto, cor_destaque)
         y += line_height
     return y - y_topo
 
 
-def _desenhar_marca_atlas(
-    draw: ImageDraw.ImageDraw, y_topo: int, largura_canvas: int, escala: float = 1.0
+def _desenhar_marca(
+    img: Image.Image, draw: ImageDraw.ImageDraw, marca: Marca, y_topo: int, largura_canvas: int, escala: float = 1.0
 ) -> int:
-    """Bloco de marca ATLAS (traço + "ATLAS" + "@atlas.tributos" + traço),
-    idêntico ao `.brand` do template HTML original. Devolve a altura ocupada."""
+    """Bloco de marca (traço + nome/logo + @handle + traço), idêntico ao
+    `.brand` do template HTML original, só que com nome/handle/cor/logo
+    configuráveis por perfil em vez de fixos na Atlas. Devolve a altura
+    ocupada."""
     y = y_topo
     largura_tra_co = 90
     x_centro = largura_canvas / 2
 
     draw.line(
         [(x_centro - largura_tra_co / 2, y), (x_centro + largura_tra_co / 2, y)],
-        fill=COR_DOURADO, width=3,
+        fill=marca.cor_destaque, width=3,
     )
     y += 20 * escala
 
-    fonte_nome = _fonte(_FONTE_LORA, round(38 * escala), b"Bold")
-    nome = "ATLAS"
-    # letter-spacing manual (Pillow não suporta nativamente)
-    _desenhar_texto_com_tracking(draw, nome, fonte_nome, x_centro, y, 2, COR_DOURADO)
-    y += fonte_nome.getbbox(nome)[3] + 8 * escala
+    altura_linha_nome = round(46 * escala)
+    if marca.logo_path and os.path.isfile(marca.logo_path):
+        try:
+            logo = Image.open(marca.logo_path).convert("RGBA")
+            razao = logo.width / logo.height if logo.height else 1.0
+            altura_logo = altura_linha_nome
+            largura_logo = round(altura_logo * razao)
+            logo = logo.resize((largura_logo, altura_logo), Image.LANCZOS)
+            img.paste(logo, (round(x_centro - largura_logo / 2), round(y)), logo)
+            y += altura_logo + 8 * escala
+        except Exception:
+            # logo corrompido/formato inesperado - não trava o post, só cai
+            # pro nome em texto (mesmo caminho de quem nunca subiu logo).
+            marca = Marca(**{**marca.__dict__, "logo_path": None})
+
+    if not marca.logo_path or not os.path.isfile(marca.logo_path or ""):
+        fonte_nome = _fonte(_FONTE_LORA, round(38 * escala), b"Bold")
+        _desenhar_texto_com_tracking(draw, marca.nome.upper(), fonte_nome, x_centro, y, 2, marca.cor_destaque)
+        y += fonte_nome.getbbox(marca.nome.upper())[3] + 8 * escala
 
     fonte_sub = _fonte(_FONTE_PLEX, round(20 * escala), b"SemiBold")
-    sub = "@ATLAS.TRIBUTOS"
+    sub = marca.handle.upper()
     _desenhar_texto_com_tracking(draw, sub, fonte_sub, x_centro, y, 7, COR_TEXTO_MUTED)
     y += fonte_sub.getbbox(sub)[3] + 20 * escala
 
     draw.line(
         [(x_centro - largura_tra_co / 2, y), (x_centro + largura_tra_co / 2, y)],
-        fill=COR_DOURADO, width=3,
+        fill=marca.cor_destaque, width=3,
     )
     y += 3
     return y - y_topo
@@ -319,7 +377,7 @@ def _desenhar_texto_com_tracking(
 
 
 def _linha_tracejada(
-    draw: ImageDraw.ImageDraw, y: int, largura_canvas: int, largura_max: int = 760
+    draw: ImageDraw.ImageDraw, y: int, largura_canvas: int, cor: tuple[int, int, int], largura_max: int = 760
 ) -> None:
     largura = min(largura_max, largura_canvas - 220)
     x0 = (largura_canvas - largura) / 2
@@ -328,13 +386,13 @@ def _linha_tracejada(
     x = x0
     while x < x1:
         fim = min(x + traco, x1)
-        draw.line([(x, y), (fim, y)], fill=COR_DOURADO, width=3)
+        draw.line([(x, y), (fim, y)], fill=cor, width=3)
         x += traco + vao
 
 
-def render_slide1(paragrafo_destaque: str, out_path: str) -> None:
-    """Imagem 1: parágrafo de destaque (regra + pegadinha) + marca ATLAS."""
-    img = _gradiente_radial((LARGURA, ALTURA), (0.15, 0.0))
+def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
+    """Imagem 1: parágrafo de destaque (regra + pegadinha) + marca do perfil."""
+    img = _gradiente_radial((LARGURA, ALTURA), (0.15, 0.0), marca.cor_fundo_claro, marca.cor_fundo_escuro)
     draw = ImageDraw.Draw(img)
 
     fonte_par = _fonte(_FONTE_LORA, 42, b"Bold")
@@ -349,19 +407,19 @@ def render_slide1(paragrafo_destaque: str, out_path: str) -> None:
     altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
     y = (ALTURA - altura_total) / 2
 
-    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height)
+    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque)
     y += 56
-    _linha_tracejada(draw, int(y), LARGURA)
+    _linha_tracejada(draw, int(y), LARGURA, marca.cor_destaque)
     y += 44
-    _desenhar_marca_atlas(draw, int(y), LARGURA)
+    _desenhar_marca(img, draw, marca, int(y), LARGURA)
 
     img.save(out_path, "PNG")
 
 
-def render_slide2(headline2: str, sub2: str, out_path: str) -> None:
-    """Imagem 2: manchete fixa + subtítulo (com o crédito à Atlas grifado) +
-    CTA pro link da bio + marca ATLAS."""
-    img = _gradiente_radial((LARGURA, ALTURA), (0.85, 1.0))
+def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
+    """Imagem 2: manchete fixa + subtítulo (com o crédito ao perfil grifado) +
+    CTA pro link da bio + marca do perfil."""
+    img = _gradiente_radial((LARGURA, ALTURA), (0.85, 1.0), marca.cor_fundo_claro, marca.cor_fundo_escuro)
     draw = ImageDraw.Draw(img)
 
     fonte_headline = _fonte(_FONTE_LORA, 40, b"Bold")
@@ -385,32 +443,34 @@ def render_slide2(headline2: str, sub2: str, out_path: str) -> None:
     )
     y = (ALTURA - altura_total) / 2
 
-    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline)
+    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque)
     y += 28
     # sub usa fonte maior/mais pesada pro trecho marcado (baseline alinhada
     # com o resto do subtítulo) - ver _desenhar_linha_rica.
     ascent_sub, _ = fonte_sub.getmetrics()
     for linha in linhas_sub:
-        _desenhar_linha_rica(draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, COR_TEXTO_MUTED)
+        _desenhar_linha_rica(
+            draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, COR_TEXTO_MUTED, marca.cor_destaque
+        )
         y += altura_linha_sub
     y += 52
-    _linha_tracejada(draw, int(y), LARGURA)
+    _linha_tracejada(draw, int(y), LARGURA, marca.cor_destaque)
     y += 44
 
     cta_x_centro = LARGURA / 2
     texto_cta_1, texto_cta_2 = "Toque no ", "link da bio"
-    texto_cta_3 = " e conheça a Atlas"
+    texto_cta_3 = f" e conheça a {marca.nome.title()}"
     l1 = draw.textlength(texto_cta_1, font=fonte_cta)
     l2 = draw.textlength(texto_cta_2, font=fonte_cta)
     l3 = draw.textlength(texto_cta_3, font=fonte_cta)
     x = cta_x_centro - (l1 + l2 + l3) / 2
     draw.text((x, y), texto_cta_1, font=fonte_cta, fill=COR_TEXTO)
     x += l1
-    draw.text((x, y), texto_cta_2, font=fonte_cta, fill=COR_DOURADO)
+    draw.text((x, y), texto_cta_2, font=fonte_cta, fill=marca.cor_destaque)
     x += l2
     draw.text((x, y), texto_cta_3, font=fonte_cta, fill=COR_TEXTO)
     y += altura_cta + 48
 
-    _desenhar_marca_atlas(draw, int(y), LARGURA, escala=34 / 38)
+    _desenhar_marca(img, draw, marca, int(y), LARGURA, escala=34 / 38)
 
     img.save(out_path, "PNG")

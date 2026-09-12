@@ -28,6 +28,7 @@ import re
 import hashlib
 import pickle
 import unicodedata
+import uuid
 import pandas as pd
 import requests
 from datetime import datetime
@@ -57,6 +58,7 @@ import auth
 import coleta_scheduler
 import main as atlas_engine
 from social import pipeline as social_pipeline
+from social import render as social_render
 from social import scheduler as social_scheduler
 from social.instagram import ErroGraphAPI, testar_conexao as testar_conexao_instagram
 
@@ -1251,6 +1253,9 @@ async def admin_restaurar_decisoes_backup(
 # externa que rodava fora do produto. Restrito a admin (guarda o token de
 # acesso da conta do Instagram, equivalente em sensibilidade ao login).
 
+_HEX_COR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
 class SocialConfigRequest(BaseModel):
     ativo: bool | None = None
     temas: list[str] | None = None
@@ -1259,6 +1264,11 @@ class SocialConfigRequest(BaseModel):
     horarios: list[str] | None = None
     igAccessToken: str | None = None
     igBusinessAccountId: str | None = None
+    marcaNome: str | None = None
+    marcaHandle: str | None = None
+    corFundoClaro: str | None = None
+    corFundoEscuro: str | None = None
+    corDestaque: str | None = None
 
 
 _HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -1293,6 +1303,10 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
                 status_code=400,
                 detail=f"Horário inválido (use HH:MM): {', '.join(invalidos)}",
             )
+    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
+        valor = getattr(req, campo)
+        if valor is not None and not _HEX_COR_RE.match(valor):
+            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
     dados = req.model_dump(exclude_unset=True)
     # campo vazio no form de token não deve apagar o token já salvo -
     # só atualiza se o usuário realmente digitou um novo.
@@ -1330,6 +1344,77 @@ def social_testar_conexao(req: TestarConexaoRequest, request: Request):
             detail=f"A Meta recusou a credencial (HTTP {e.status_code}): {e.resposta}",
         )
     return {"ok": True, "username": info.get("username"), "nome": info.get("name")}
+
+
+_EXTENSOES_LOGO = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+
+
+@app.post("/social/logo")
+async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
+    """Logo do escritório/perfil pro rodapé de marca dos posts (ver
+    social/render.py) - guardado no mesmo volume persistente das imagens
+    geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
+    que já existe (a Graph API também precisa alcançar essas URLs)."""
+    _exigir_admin(request)
+    extensao = _EXTENSOES_LOGO.get(arquivo.content_type)
+    if not extensao:
+        raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
+    conteudo = await arquivo.read()
+    if len(conteudo) > 3 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo muito grande (máximo 3MB)")
+    nome_arquivo = f"logo_{uuid.uuid4().hex}{extensao}"
+    with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
+        f.write(conteudo)
+    config = app_db.salvar_social_config({"logoPath": nome_arquivo})
+    return {"logoPath": config["logoPath"]}
+
+
+@app.delete("/social/logo")
+def social_remover_logo(request: Request):
+    _exigir_admin(request)
+    config = app_db.salvar_social_config({"logoPath": ""})
+    return {"logoPath": config["logoPath"]}
+
+
+class SocialPreviewRequest(BaseModel):
+    marcaNome: str | None = None
+    marcaHandle: str | None = None
+    corFundoClaro: str | None = None
+    corFundoEscuro: str | None = None
+    corDestaque: str | None = None
+
+
+_PARAGRAFO_PREVIEW = (
+    "STF decide que o benefício fiscal vale mesmo sem homologação expressa da Receita, "
+    "§§independentemente de ato declaratório posterior§§."
+)
+_SUB2_PREVIEW = "Análise §§gerada automaticamente pela {marca}§§ a partir da decisão real de hoje."
+
+
+@app.post("/social/preview")
+def social_preview(req: SocialPreviewRequest, request: Request):
+    """Gera as duas imagens de exemplo com a identidade visual atual (salva
+    + overrides não salvos ainda, pra pré-visualizar cor/logo antes de
+    clicar em Salvar) - usa um texto fixo de exemplo, nunca uma decisão
+    real, então pode ser chamado quantas vezes quiser sem gastar Claude."""
+    _exigir_admin(request)
+    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
+        valor = getattr(req, campo)
+        if valor is not None and not _HEX_COR_RE.match(valor):
+            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
+    config = {**app_db.obter_social_config(), **req.model_dump(exclude_unset=True)}
+    marca = social_pipeline.marca_da_config(config)
+    nome1, nome2 = "preview_1.png", "preview_2.png"
+    social_render.render_slide1(
+        _PARAGRAFO_PREVIEW, os.path.join(social_pipeline.PASTA_IMAGENS, nome1), marca=marca
+    )
+    social_render.render_slide2(
+        "Inteligência tributária, todos os dias.",
+        _SUB2_PREVIEW.format(marca=marca.nome),
+        os.path.join(social_pipeline.PASTA_IMAGENS, nome2),
+        marca=marca,
+    )
+    return {"imagem1Path": nome1, "imagem2Path": nome2}
 
 
 @app.get("/social/posts")
@@ -1374,6 +1459,7 @@ def raiz():
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
             "/auth/users",
             "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
+            "/social/logo", "/social/preview",
             "/admin/coletar-decisoes-agora",
         ],
     }

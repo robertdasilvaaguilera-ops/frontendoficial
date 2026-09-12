@@ -115,6 +115,12 @@ def iniciar():
             horarios TEXT NOT NULL DEFAULT '[]',
             ig_access_token TEXT NOT NULL DEFAULT '',
             ig_business_account_id TEXT NOT NULL DEFAULT '',
+            marca_nome TEXT NOT NULL DEFAULT 'ATLAS',
+            marca_handle TEXT NOT NULL DEFAULT '@atlas.tributos',
+            cor_fundo_claro TEXT NOT NULL DEFAULT '#171B24',
+            cor_fundo_escuro TEXT NOT NULL DEFAULT '#0B0D12',
+            cor_destaque TEXT NOT NULL DEFAULT '#D9A544',
+            logo_path TEXT NOT NULL DEFAULT '',
             atualizado_em TEXT
         )
     """)
@@ -145,6 +151,7 @@ def iniciar():
     """)
     conn.commit()
     _migrar_credenciais_legado(conn)
+    _migrar_social_config_marca(conn)
     conn.close()
 
 
@@ -188,6 +195,26 @@ def _migrar_credenciais_legado(conn: sqlite3.Connection) -> None:
                 expira_em TEXT
             )
         """)
+    conn.commit()
+
+
+def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
+    """Bancos criados antes da identidade de marca (nome/handle/cores/logo)
+    ficarem configuráveis não têm essas colunas - adiciona com os mesmos
+    defaults do CREATE TABLE acima (a identidade original da Atlas), pra
+    quem já tinha configuração salva continuar publicando exatamente igual."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_config)")}
+    novas = {
+        "marca_nome": "'ATLAS'",
+        "marca_handle": "'@atlas.tributos'",
+        "cor_fundo_claro": "'#171B24'",
+        "cor_fundo_escuro": "'#0B0D12'",
+        "cor_destaque": "'#D9A544'",
+        "logo_path": "''",
+    }
+    for coluna, default in novas.items():
+        if coluna not in colunas:
+            conn.execute(f"ALTER TABLE social_config ADD COLUMN {coluna} TEXT NOT NULL DEFAULT {default}")
     conn.commit()
 
 
@@ -533,6 +560,12 @@ _SOCIAL_CONFIG_PADRAO = {
     "horarios": [],
     "igAccessToken": "",
     "igBusinessAccountId": "",
+    "marcaNome": "ATLAS",
+    "marcaHandle": "@atlas.tributos",
+    "corFundoClaro": "#171B24",
+    "corFundoEscuro": "#0B0D12",
+    "corDestaque": "#D9A544",
+    "logoPath": "",
 }
 
 
@@ -550,6 +583,12 @@ def obter_social_config() -> dict:
         "horarios": json.loads(linha["horarios"] or "[]"),
         "igAccessToken": linha["ig_access_token"] or "",
         "igBusinessAccountId": linha["ig_business_account_id"] or "",
+        "marcaNome": linha["marca_nome"] or "ATLAS",
+        "marcaHandle": linha["marca_handle"] or "@atlas.tributos",
+        "corFundoClaro": linha["cor_fundo_claro"] or "#171B24",
+        "corFundoEscuro": linha["cor_fundo_escuro"] or "#0B0D12",
+        "corDestaque": linha["cor_destaque"] or "#D9A544",
+        "logoPath": linha["logo_path"] or "",
     }
 
 
@@ -564,13 +603,17 @@ def salvar_social_config(dados: dict) -> dict:
     conn.execute(
         """
         INSERT INTO social_config
-            (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id, atualizado_em)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
+             marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path, atualizado_em)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
             tom = excluded.tom, horarios = excluded.horarios,
             ig_access_token = excluded.ig_access_token,
             ig_business_account_id = excluded.ig_business_account_id,
+            marca_nome = excluded.marca_nome, marca_handle = excluded.marca_handle,
+            cor_fundo_claro = excluded.cor_fundo_claro, cor_fundo_escuro = excluded.cor_fundo_escuro,
+            cor_destaque = excluded.cor_destaque, logo_path = excluded.logo_path,
             atualizado_em = excluded.atualizado_em
         """,
         (
@@ -581,6 +624,12 @@ def salvar_social_config(dados: dict) -> dict:
             json.dumps(mesclado["horarios"], ensure_ascii=False),
             mesclado["igAccessToken"],
             mesclado["igBusinessAccountId"],
+            mesclado["marcaNome"],
+            mesclado["marcaHandle"],
+            mesclado["corFundoClaro"],
+            mesclado["corFundoEscuro"],
+            mesclado["corDestaque"],
+            mesclado["logoPath"],
             agora,
         ),
     )
