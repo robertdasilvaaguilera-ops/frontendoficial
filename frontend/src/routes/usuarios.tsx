@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { Plus, Trash2, UserRound, Loader2, ShieldAlert } from "lucide-react";
-import { usersQuery, removerUsuario, NIVEL_LABEL } from "@/lib/auth-api";
+import { useRef, useState } from "react";
+import { Plus, Trash2, UserRound, Loader2, ShieldAlert, UploadCloud } from "lucide-react";
+import { usersQuery, removerUsuario, restaurarDecisoesBackup, NIVEL_LABEL } from "@/lib/auth-api";
 import { useSessaoAtual } from "@/components/AuthGate";
 import { UserFormModal } from "@/components/UserFormModal";
 
@@ -149,6 +149,68 @@ function UsuariosAdmin({ usuarioLogado }: { usuarioLogado: string }) {
           </tbody>
         </table>
       </div>
+
+      <RestaurarBackupDecisoes />
+    </div>
+  );
+}
+
+// Recuperação pontual do Excel de decisões perdido nos redeploys anteriores
+// ao volume persistente (ATLAS_DATA_DIR) entrar em vigor - restaura a partir
+// de um backup local pré-migração. Uso único; remover depois de restaurado.
+function RestaurarBackupDecisoes() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [enviando, setEnviando] = useState(false);
+  const [resultado, setResultado] = useState<string | null>(null);
+  const [erro, setErro] = useState<string | null>(null);
+
+  async function enviar() {
+    const arquivo = inputRef.current?.files?.[0];
+    if (!arquivo) return;
+    setEnviando(true);
+    setErro(null);
+    setResultado(null);
+    try {
+      const r = await restaurarDecisoesBackup(arquivo);
+      setResultado(
+        `${r.linhasRestauradas} decisões restauradas (${r.linksMarcadosVistos} links marcados como já vistos).`,
+      );
+      if (inputRef.current) inputRef.current.value = "";
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui restaurar o backup agora.");
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <div className="mt-8 surface rounded-lg p-6">
+      <div className="text-[11px] font-mono uppercase tracking-widest text-muted-foreground">
+        Restaurar backup de decisões
+      </div>
+      <p className="mt-1.5 text-sm text-muted-foreground max-w-xl">
+        Recuperação pontual do Excel de decisões perdido em redeploys anteriores à correção de
+        persistência. Selecione o arquivo .xlsx de backup e confirme.
+      </p>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".xlsx"
+          disabled={enviando}
+          className="text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-accent file:px-3 file:py-1.5 file:text-xs file:font-medium"
+        />
+        <button
+          onClick={enviar}
+          disabled={enviando}
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {enviando ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
+          Restaurar
+        </button>
+      </div>
+      {resultado && <p className="mt-3 text-sm text-emerald-600">{resultado}</p>}
+      {erro && <p className="mt-3 text-sm text-risk">{erro}</p>}
     </div>
   );
 }

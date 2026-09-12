@@ -21,6 +21,8 @@ dispositivo/aplicacaoPratica) e gerado sob demanda via POST
 /opportunities/{id}/parecer (Claude - ver ai/parecer.py), nao vem
 pre-computado no Excel.
 """
+import io
+import json
 import os
 import re
 import hashlib
@@ -30,7 +32,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -1219,6 +1221,27 @@ def admin_coletar_decisoes_agora(request: Request):
     # _carregar_dados() já detecta sozinha que o Excel mudou (mtime) e relê -
     # não precisa invalidar nada aqui manualmente.
     return {"ok": True}
+
+
+# Restauração pontual do Excel de decisões perdido nos redeploys anteriores
+# ao ATLAS_DATA_DIR entrar em vigor (dados recuperados de um backup local
+# pré-migração) - endpoint de uso único, remover depois de restaurar.
+@app.post("/admin/restaurar-decisoes-backup")
+async def admin_restaurar_decisoes_backup(
+    request: Request,
+    arquivo: UploadFile = File(...),
+):
+    _exigir_admin(request)
+
+    conteudo = await arquivo.read()
+    df = pd.read_excel(io.BytesIO(conteudo))
+    df.to_excel(paths.caminho("reports", "oportunidades.xlsx"), index=False)
+
+    vistos = set(df["link"].dropna().astype(str)) if "link" in df.columns else set()
+    with open(paths.caminho("logs", "vistos.json"), "w", encoding="utf-8") as f:
+        json.dump(list(vistos), f, ensure_ascii=False)
+
+    return {"ok": True, "linhas_restauradas": len(df), "links_marcados_vistos": len(vistos)}
 
 
 # --- Mídia Social (automação de posts de Instagram) -----------------------
