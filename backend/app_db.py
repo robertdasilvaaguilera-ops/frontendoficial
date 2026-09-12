@@ -30,6 +30,7 @@ def iniciar():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             id TEXT PRIMARY KEY,
+            usuario TEXT NOT NULL DEFAULT '',
             nome TEXT NOT NULL,
             cnpj TEXT,
             regime TEXT,
@@ -54,6 +55,7 @@ def iniciar():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS conversas (
             id TEXT PRIMARY KEY,
+            usuario TEXT NOT NULL DEFAULT '',
             titulo TEXT,
             mensagens TEXT NOT NULL,
             criado_em TEXT,
@@ -112,12 +114,15 @@ def iniciar():
         )
     """)
     # Mídia Social - automação de posts de Instagram (ver social/*.py e as
-    # rotas /social/* em api_server.py). Config é uma linha única (id=1);
-    # decisões usadas evita repetir a mesma decisão em posts futuros; posts
-    # é o histórico (sucesso ou erro) mostrado na aba Mídia Social.
+    # rotas /social/* em api_server.py). Cada usuário tem a própria linha de
+    # config (próprio token do Instagram, própria identidade visual, próprios
+    # horários) - cada escritório automatiza o próprio perfil, isolado dos
+    # demais logins; decisões usadas evita repetir a mesma decisão em posts
+    # futuros de um mesmo usuário; posts é o histórico (sucesso ou erro)
+    # mostrado na aba Mídia Social, também por usuário.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS social_config (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            usuario TEXT PRIMARY KEY,
             ativo INTEGER NOT NULL DEFAULT 0,
             temas TEXT NOT NULL DEFAULT '[]',
             objetivos TEXT NOT NULL DEFAULT '',
@@ -142,13 +147,16 @@ def iniciar():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS social_decisoes_usadas (
-            decisao_id TEXT PRIMARY KEY,
-            usado_em TEXT
+            usuario TEXT NOT NULL,
+            decisao_id TEXT NOT NULL,
+            usado_em TEXT,
+            PRIMARY KEY (usuario, decisao_id)
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS social_posts (
             id TEXT PRIMARY KEY,
+            usuario TEXT NOT NULL DEFAULT '',
             criado_em TEXT,
             decisao_id TEXT,
             titulo TEXT,
@@ -168,6 +176,18 @@ def iniciar():
     conn.commit()
     _migrar_credenciais_legado(conn)
     _migrar_social_config_marca(conn)
+    _migrar_clientes_dono(conn)
+    _migrar_conversas_dono(conn)
+    _migrar_social_config_multiusuario(conn)
+    _migrar_social_decisoes_usadas_dono(conn)
+    _migrar_social_posts_dono(conn)
+    # Índices só depois das migrações acima - em bancos legados, a coluna
+    # `usuario` só passa a existir depois que elas rodam (bancos novos já
+    # nascem com a coluna, então isso é um no-op nesse caso).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_usuario ON clientes(usuario)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversas_usuario ON conversas(usuario)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_social_posts_usuario ON social_posts(usuario)")
+    conn.commit()
     conn.close()
 
 
@@ -246,31 +266,171 @@ def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _usuario_admin_legado(conn: sqlite3.Connection) -> str | None:
+    """Login que herda os dados de dono único de antes do multiusuário
+    (carteira de clientes, conversas do Copiloto, automação de Mídia Social)
+    - o primeiro admin, ou se nenhum existir ainda, o primeiro login
+    cadastrado. Usado só pelas migrações abaixo, uma vez cada."""
+    linha = conn.execute(
+        "SELECT usuario FROM credencial WHERE nivel = 'admin' ORDER BY criado_em ASC LIMIT 1"
+    ).fetchone()
+    if not linha:
+        linha = conn.execute("SELECT usuario FROM credencial ORDER BY criado_em ASC LIMIT 1").fetchone()
+    return linha["usuario"] if linha else None
+
+
+def _migrar_clientes_dono(conn: sqlite3.Connection) -> None:
+    """Bancos de antes do multiusuário não tinham dono na carteira de
+    clientes (todo mundo via tudo) - atribui os clientes já cadastrados ao
+    login legado (ver _usuario_admin_legado), pra continuar exatamente onde
+    estava em vez de "perder" a carteira."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(clientes)")}
+    if "usuario" in colunas:
+        return
+    conn.execute("ALTER TABLE clientes ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
+    dono = _usuario_admin_legado(conn)
+    if dono:
+        conn.execute("UPDATE clientes SET usuario = ? WHERE usuario = ''", (dono,))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_usuario ON clientes(usuario)")
+    conn.commit()
+
+
+def _migrar_conversas_dono(conn: sqlite3.Connection) -> None:
+    """Mesma lógica de _migrar_clientes_dono, pro histórico do Copiloto -
+    cada conversa passa a pertencer a quem a criou; as já existentes (de
+    antes de existir dono) vão para o login legado."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(conversas)")}
+    if "usuario" in colunas:
+        return
+    conn.execute("ALTER TABLE conversas ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
+    dono = _usuario_admin_legado(conn)
+    if dono:
+        conn.execute("UPDATE conversas SET usuario = ? WHERE usuario = ''", (dono,))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversas_usuario ON conversas(usuario)")
+    conn.commit()
+
+
+def _migrar_social_config_multiusuario(conn: sqlite3.Connection) -> None:
+    """Versões anteriores tinham uma única configuração de Mídia Social
+    (id=1) compartilhada por toda a equipe - cada login precisa da própria
+    (próprio token do Instagram, própria identidade visual, próprios
+    horários), então a linha única vira uma linha por usuário (chave
+    primária `usuario`). A config antiga, se existir, vira a config do login
+    legado, pra quem já estava automatizado continuar publicando exatamente
+    como antes."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_config)")}
+    if "usuario" in colunas:
+        return
+    conn.execute("ALTER TABLE social_config RENAME TO social_config_legado")
+    conn.execute("""
+        CREATE TABLE social_config (
+            usuario TEXT PRIMARY KEY,
+            ativo INTEGER NOT NULL DEFAULT 0,
+            temas TEXT NOT NULL DEFAULT '[]',
+            objetivos TEXT NOT NULL DEFAULT '',
+            tom TEXT NOT NULL DEFAULT '',
+            horarios TEXT NOT NULL DEFAULT '[]',
+            ig_access_token TEXT NOT NULL DEFAULT '',
+            ig_business_account_id TEXT NOT NULL DEFAULT '',
+            marca_nome TEXT NOT NULL DEFAULT 'ATLAS',
+            marca_handle TEXT NOT NULL DEFAULT '@atlas.tributos',
+            cor_fundo_claro TEXT NOT NULL DEFAULT '#171B24',
+            cor_fundo_escuro TEXT NOT NULL DEFAULT '#0B0D12',
+            cor_destaque TEXT NOT NULL DEFAULT '#D9A544',
+            logo_path TEXT NOT NULL DEFAULT '',
+            estilo TEXT NOT NULL DEFAULT 'classico',
+            texto_claro INTEGER NOT NULL DEFAULT 1,
+            fundo1_path TEXT NOT NULL DEFAULT '',
+            fundo2_path TEXT NOT NULL DEFAULT '',
+            posicao_vertical TEXT NOT NULL DEFAULT 'centro',
+            alinhamento TEXT NOT NULL DEFAULT 'centro',
+            atualizado_em TEXT
+        )
+    """)
+    dono = _usuario_admin_legado(conn)
+    linha_legado = conn.execute("SELECT * FROM social_config_legado WHERE id = 1").fetchone()
+    if linha_legado and dono:
+        # Nomes de coluna vêm só do próprio schema legado (nunca de entrada
+        # externa) - "id" é a única que não existe na tabela nova.
+        campos = [c for c in linha_legado.keys() if c != "id"]
+        placeholders = ", ".join("?" for _ in campos)
+        conn.execute(
+            f"INSERT INTO social_config (usuario, {', '.join(campos)}) VALUES (?, {placeholders})",
+            (dono, *[linha_legado[c] for c in campos]),
+        )
+    conn.execute("DROP TABLE social_config_legado")
+    conn.commit()
+
+
+def _migrar_social_decisoes_usadas_dono(conn: sqlite3.Connection) -> None:
+    """Idem social_config: decisão usada passa a ser por usuário (cada
+    automação evita repetir só as próprias decisões já publicadas, não as de
+    outros logins) - histórico existente vai para o login legado."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_decisoes_usadas)")}
+    if "usuario" in colunas:
+        return
+    conn.execute("ALTER TABLE social_decisoes_usadas RENAME TO social_decisoes_usadas_legado")
+    conn.execute("""
+        CREATE TABLE social_decisoes_usadas (
+            usuario TEXT NOT NULL,
+            decisao_id TEXT NOT NULL,
+            usado_em TEXT,
+            PRIMARY KEY (usuario, decisao_id)
+        )
+    """)
+    dono = _usuario_admin_legado(conn)
+    if dono:
+        conn.execute(
+            "INSERT INTO social_decisoes_usadas (usuario, decisao_id, usado_em) "
+            "SELECT ?, decisao_id, usado_em FROM social_decisoes_usadas_legado",
+            (dono,),
+        )
+    conn.execute("DROP TABLE social_decisoes_usadas_legado")
+    conn.commit()
+
+
+def _migrar_social_posts_dono(conn: sqlite3.Connection) -> None:
+    """Idem clientes/conversas: histórico de posts existente vai para o
+    login legado; novos posts já nascem com o usuário que os gerou."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_posts)")}
+    if "usuario" in colunas:
+        return
+    conn.execute("ALTER TABLE social_posts ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
+    dono = _usuario_admin_legado(conn)
+    if dono:
+        conn.execute("UPDATE social_posts SET usuario = ? WHERE usuario = ''", (dono,))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_social_posts_usuario ON social_posts(usuario)")
+    conn.commit()
+
+
 # --- clientes ---------------------------------------------------------
 
-def listar_clientes() -> list[dict]:
+def listar_clientes(usuario: str) -> list[dict]:
     conn = _conectar()
-    linhas = conn.execute("SELECT * FROM clientes ORDER BY criado_em DESC").fetchall()
+    linhas = conn.execute(
+        "SELECT * FROM clientes WHERE usuario = ? ORDER BY criado_em DESC", (usuario,)
+    ).fetchall()
     conn.close()
     return [_linha_cliente_para_dict(l) for l in linhas]
 
 
-def inserir_cliente(dados: dict) -> dict:
+def inserir_cliente(dados: dict, usuario: str) -> dict:
     id_ = uuid.uuid4().hex[:12]
     criado_em = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
     conn.execute(
         """
         INSERT INTO clientes (
-            id, nome, cnpj, regime, setor, cnae, uf, cidade,
+            id, usuario, nome, cnpj, regime, setor, cnae, uf, cidade,
             tributos_relevantes, faturamento_anual, grupo_economico,
             comercio_exterior, folha_relevante, ufs_atuacao,
             contencioso_ativo, contencioso_descricao, tese_interesse,
             prioridade, observacoes, criado_em
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             id_,
+            usuario,
             dados.get("nome", ""),
             dados.get("cnpj", ""),
             dados.get("regime", ""),
@@ -294,27 +454,29 @@ def inserir_cliente(dados: dict) -> dict:
     )
     conn.commit()
     conn.close()
-    return listar_cliente_por_id(id_)
+    return listar_cliente_por_id(id_, usuario)
 
 
-def listar_cliente_por_id(id_: str) -> dict | None:
+def listar_cliente_por_id(id_: str, usuario: str) -> dict | None:
     conn = _conectar()
-    linha = conn.execute("SELECT * FROM clientes WHERE id = ?", (id_,)).fetchone()
+    linha = conn.execute(
+        "SELECT * FROM clientes WHERE id = ? AND usuario = ?", (id_, usuario)
+    ).fetchone()
     conn.close()
     return _linha_cliente_para_dict(linha) if linha else None
 
 
-def remover_cliente(id_: str) -> bool:
+def remover_cliente(id_: str, usuario: str) -> bool:
     conn = _conectar()
-    cur = conn.execute("DELETE FROM clientes WHERE id = ?", (id_,))
+    cur = conn.execute("DELETE FROM clientes WHERE id = ? AND usuario = ?", (id_, usuario))
     conn.commit()
     conn.close()
     return cur.rowcount > 0
 
 
-def contar_clientes() -> int:
+def contar_clientes(usuario: str) -> int:
     conn = _conectar()
-    n = conn.execute("SELECT COUNT(*) FROM clientes").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM clientes WHERE usuario = ?", (usuario,)).fetchone()[0]
     conn.close()
     return int(n)
 
@@ -345,10 +507,12 @@ def _linha_cliente_para_dict(linha: sqlite3.Row) -> dict:
 
 # --- conversas do Copiloto ---------------------------------------------
 
-def listar_conversas() -> list[dict]:
+def listar_conversas(usuario: str) -> list[dict]:
     conn = _conectar()
     linhas = conn.execute(
-        "SELECT id, titulo, criado_em, atualizado_em FROM conversas ORDER BY atualizado_em DESC"
+        "SELECT id, titulo, criado_em, atualizado_em FROM conversas "
+        "WHERE usuario = ? ORDER BY atualizado_em DESC",
+        (usuario,),
     ).fetchall()
     conn.close()
     return [
@@ -362,9 +526,11 @@ def listar_conversas() -> list[dict]:
     ]
 
 
-def obter_conversa(id_: str) -> dict | None:
+def obter_conversa(id_: str, usuario: str) -> dict | None:
     conn = _conectar()
-    linha = conn.execute("SELECT * FROM conversas WHERE id = ?", (id_,)).fetchone()
+    linha = conn.execute(
+        "SELECT * FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario)
+    ).fetchone()
     conn.close()
     if not linha:
         return None
@@ -377,31 +543,43 @@ def obter_conversa(id_: str) -> dict | None:
     }
 
 
-def salvar_conversa(id_: str | None, titulo: str, mensagens: list[dict]) -> dict:
-    """Cria a conversa se id_ for None/novo, ou atualiza se já existir -
-    o Copiloto salva a cada troca de mensagem, então é sempre um upsert."""
+def salvar_conversa(id_: str | None, titulo: str, mensagens: list[dict], usuario: str) -> dict:
+    """Cria a conversa se id_ for None/novo, ou atualiza se já existir (e for
+    do mesmo usuário) - o Copiloto salva a cada troca de mensagem, então é
+    sempre um upsert. Um id que não é deste usuário é tratado como novo
+    (nunca sobrescreve/anexa a conversa de outro login)."""
     agora = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
-    if id_ and conn.execute("SELECT 1 FROM conversas WHERE id = ?", (id_,)).fetchone():
+    existente = (
+        conn.execute(
+            "SELECT 1 FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario)
+        ).fetchone()
+        if id_
+        else None
+    )
+    if existente:
         conn.execute(
             "UPDATE conversas SET titulo = ?, mensagens = ?, atualizado_em = ? WHERE id = ?",
             (titulo, json.dumps(mensagens, ensure_ascii=False), agora, id_),
         )
     else:
-        id_ = id_ or uuid.uuid4().hex[:12]
+        # id_ ausente, ou pertencente a outro usuário (nunca reaproveitado,
+        # pra não colidir com a PK de uma conversa que não é desta pessoa) -
+        # sempre nasce com um id novo.
+        id_ = uuid.uuid4().hex[:12]
         conn.execute(
-            "INSERT INTO conversas (id, titulo, mensagens, criado_em, atualizado_em) "
-            "VALUES (?,?,?,?,?)",
-            (id_, titulo, json.dumps(mensagens, ensure_ascii=False), agora, agora),
+            "INSERT INTO conversas (id, usuario, titulo, mensagens, criado_em, atualizado_em) "
+            "VALUES (?,?,?,?,?,?)",
+            (id_, usuario, titulo, json.dumps(mensagens, ensure_ascii=False), agora, agora),
         )
     conn.commit()
     conn.close()
-    return obter_conversa(id_)
+    return obter_conversa(id_, usuario)
 
 
-def remover_conversa(id_: str) -> bool:
+def remover_conversa(id_: str, usuario: str) -> bool:
     conn = _conectar()
-    cur = conn.execute("DELETE FROM conversas WHERE id = ?", (id_,))
+    cur = conn.execute("DELETE FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario))
     conn.commit()
     conn.close()
     return cur.rowcount > 0
@@ -500,11 +678,21 @@ def criar_usuario(usuario: str, senha_hash: str, senha_salt: str, nivel: str) ->
 
 
 def remover_usuario(usuario: str) -> None:
+    """Remove o login e tudo que é exclusivamente dele - inclui a
+    automação de Mídia Social (social_config): sem isso, um usuário
+    removido continuaria automaticamente publicando no Instagram dele pra
+    sempre, já que o agendador (social/scheduler.py) não olha credencial,
+    só quem tem config ativa. Carteira de clientes e conversas do Copiloto
+    ficam guardadas (só ficam inacessíveis, ninguém mais loga como esse
+    usuário) - histórico do escritório, não um segredo de acesso como o
+    token do Instagram."""
+    usuario = usuario.strip()
     conn = _conectar()
-    conn.execute("DELETE FROM credencial WHERE usuario = ?", (usuario.strip(),))
-    conn.execute("DELETE FROM sessao WHERE usuario = ?", (usuario.strip(),))
-    conn.execute("DELETE FROM uso_semanal WHERE usuario = ?", (usuario.strip(),))
-    conn.execute("DELETE FROM uso_chat_diario WHERE usuario = ?", (usuario.strip(),))
+    conn.execute("DELETE FROM credencial WHERE usuario = ?", (usuario,))
+    conn.execute("DELETE FROM sessao WHERE usuario = ?", (usuario,))
+    conn.execute("DELETE FROM uso_semanal WHERE usuario = ?", (usuario,))
+    conn.execute("DELETE FROM uso_chat_diario WHERE usuario = ?", (usuario,))
+    conn.execute("DELETE FROM social_config WHERE usuario = ?", (usuario,))
     conn.commit()
     conn.close()
 
@@ -636,9 +824,9 @@ _SOCIAL_CONFIG_PADRAO = {
 }
 
 
-def obter_social_config() -> dict:
+def obter_social_config(usuario: str) -> dict:
     conn = _conectar()
-    linha = conn.execute("SELECT * FROM social_config WHERE id = 1").fetchone()
+    linha = conn.execute("SELECT * FROM social_config WHERE usuario = ?", (usuario,)).fetchone()
     conn.close()
     if not linha:
         return dict(_SOCIAL_CONFIG_PADRAO)
@@ -665,22 +853,22 @@ def obter_social_config() -> dict:
     }
 
 
-def salvar_social_config(dados: dict) -> dict:
-    """Upsert da linha única de configuração (id=1). Campos ausentes em
-    `dados` mantêm o valor já salvo (permite, por ex., atualizar só os
-    horários sem reenviar o token do Instagram)."""
-    atual = obter_social_config()
+def salvar_social_config(usuario: str, dados: dict) -> dict:
+    """Upsert da configuração deste usuário. Campos ausentes em `dados`
+    mantêm o valor já salvo (permite, por ex., atualizar só os horários sem
+    reenviar o token do Instagram)."""
+    atual = obter_social_config(usuario)
     mesclado = {**atual, **{k: v for k, v in dados.items() if v is not None}}
     agora = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
     conn.execute(
         """
         INSERT INTO social_config
-            (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
+            (usuario, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
              marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path,
              estilo, texto_claro, fundo1_path, fundo2_path, posicao_vertical, alinhamento, atualizado_em)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(usuario) DO UPDATE SET
             ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
             tom = excluded.tom, horarios = excluded.horarios,
             ig_access_token = excluded.ig_access_token,
@@ -694,6 +882,7 @@ def salvar_social_config(dados: dict) -> dict:
             atualizado_em = excluded.atualizado_em
         """,
         (
+            usuario,
             int(bool(mesclado["ativo"])),
             json.dumps(mesclado["temas"], ensure_ascii=False),
             mesclado["objetivos"],
@@ -718,49 +907,55 @@ def salvar_social_config(dados: dict) -> dict:
     )
     conn.commit()
     conn.close()
-    return obter_social_config()
+    return obter_social_config(usuario)
 
 
-def social_decisao_ja_usada(decisao_id: str) -> bool:
+def listar_usuarios_social_ativos() -> list[str]:
+    """Todo usuário com a automação ligada (`ativo`) e pelo menos um
+    horário configurado - usado pelo agendador pra saber pra quem montar
+    jobs (ver social/scheduler.py: um job por usuário/horário, não um job
+    global só)."""
     conn = _conectar()
-    linha = conn.execute(
-        "SELECT 1 FROM social_decisoes_usadas WHERE decisao_id = ?", (decisao_id,)
-    ).fetchone()
+    linhas = conn.execute(
+        "SELECT usuario FROM social_config WHERE ativo = 1 AND horarios != '[]'"
+    ).fetchall()
     conn.close()
-    return linha is not None
+    return [l["usuario"] for l in linhas]
 
 
-def listar_social_decisoes_usadas() -> set[str]:
+def listar_social_decisoes_usadas(usuario: str) -> set[str]:
     conn = _conectar()
-    linhas = conn.execute("SELECT decisao_id FROM social_decisoes_usadas").fetchall()
+    linhas = conn.execute(
+        "SELECT decisao_id FROM social_decisoes_usadas WHERE usuario = ?", (usuario,)
+    ).fetchall()
     conn.close()
     return {l["decisao_id"] for l in linhas}
 
 
-def marcar_social_decisao_usada(decisao_id: str) -> None:
+def marcar_social_decisao_usada(usuario: str, decisao_id: str) -> None:
     agora = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
     conn.execute(
-        "INSERT OR IGNORE INTO social_decisoes_usadas (decisao_id, usado_em) VALUES (?, ?)",
-        (decisao_id, agora),
+        "INSERT OR IGNORE INTO social_decisoes_usadas (usuario, decisao_id, usado_em) VALUES (?, ?, ?)",
+        (usuario, decisao_id, agora),
     )
     conn.commit()
     conn.close()
 
 
-def inserir_social_post(dados: dict) -> dict:
+def inserir_social_post(usuario: str, dados: dict) -> dict:
     id_ = uuid.uuid4().hex[:12]
     agora = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
     conn.execute(
         """
         INSERT INTO social_posts (
-            id, criado_em, decisao_id, titulo, paragrafo_destaque, headline2, sub2,
+            id, usuario, criado_em, decisao_id, titulo, paragrafo_destaque, headline2, sub2,
             legenda, gancho, imagem1_path, imagem2_path, status, post_id, permalink, erro_detalhe
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            id_, agora,
+            id_, usuario, agora,
             dados.get("decisaoId"), dados.get("titulo", ""),
             dados.get("paragrafoDestaque", ""), dados.get("headline2", ""), dados.get("sub2", ""),
             dados.get("legenda", ""), dados.get("gancho", ""),
@@ -781,21 +976,22 @@ def obter_social_post(id_: str) -> dict | None:
     return _linha_social_post_para_dict(linha) if linha else None
 
 
-def listar_social_posts(limit: int = 30) -> list[dict]:
+def listar_social_posts(usuario: str, limit: int = 30) -> list[dict]:
     conn = _conectar()
     linhas = conn.execute(
-        "SELECT * FROM social_posts ORDER BY criado_em DESC LIMIT ?", (limit,)
+        "SELECT * FROM social_posts WHERE usuario = ? ORDER BY criado_em DESC LIMIT ?",
+        (usuario, limit),
     ).fetchall()
     conn.close()
     return [_linha_social_post_para_dict(l) for l in linhas]
 
 
-def ultimos_ganchos_social(n: int = 5) -> list[str]:
+def ultimos_ganchos_social(usuario: str, n: int = 5) -> list[str]:
     conn = _conectar()
     linhas = conn.execute(
-        "SELECT gancho FROM social_posts WHERE status = 'publicado' AND gancho != '' "
+        "SELECT gancho FROM social_posts WHERE usuario = ? AND status = 'publicado' AND gancho != '' "
         "ORDER BY criado_em DESC LIMIT ?",
-        (n,),
+        (usuario, n),
     ).fetchall()
     conn.close()
     return [l["gancho"] for l in linhas]

@@ -72,36 +72,40 @@ def marca_da_config(config: dict) -> render.Marca:
     )
 
 
-def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dict:
+def executar_ciclo(usuario: str, decisoes_candidatas: list[dict], forcar: bool = False) -> dict:
     """
+    usuario: dono desta automação - cada login publica no próprio Instagram,
+        com a própria identidade visual e o próprio histórico de decisões já
+        usadas (ver app_db: social_config/social_decisoes_usadas/social_posts
+        são todos por usuário).
     decisoes_candidatas: mesmo formato usado pelo antigo
-    /automacao/decisoes-recentes (id, titulo, tribunal, data_julgamento,
-    setor_economico, mecanismo, tributos, resumo, impacto_estimado,
-    link_fonte), já buscado pelo chamador (api_server, que tem acesso ao
-    DataFrame de decisões).
+        /automacao/decisoes-recentes (id, titulo, tribunal, data_julgamento,
+        setor_economico, mecanismo, tributos, resumo, impacto_estimado,
+        link_fonte), já buscado pelo chamador (api_server, que tem acesso ao
+        DataFrame de decisões).
     forcar: ignora o toggle "ativo" da configuração - usado pelo botão
         "Publicar agora" (teste manual), nunca pelo agendador.
     """
-    config = app_db.obter_social_config()
+    config = app_db.obter_social_config(usuario)
 
     if not forcar and not config["ativo"]:
-        return app_db.inserir_social_post({"status": "inativo", "erroDetalhe": "Automação desativada"})
+        return app_db.inserir_social_post(usuario, {"status": "inativo", "erroDetalhe": "Automação desativada"})
 
     if not config["igAccessToken"] or not config["igBusinessAccountId"]:
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "erro",
             "erroDetalhe": "Credenciais do Instagram não configuradas (token ou ID da conta ausente).",
         })
 
-    usadas = app_db.listar_social_decisoes_usadas()
+    usadas = app_db.listar_social_decisoes_usadas(usuario)
     candidatas = [d for d in decisoes_candidatas if d.get("id") not in usadas]
     if not candidatas:
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "sem_decisao",
             "erroDetalhe": "Nenhuma decisão nova disponível (todas as candidatas já foram usadas).",
         })
 
-    ganchos_recentes = app_db.ultimos_ganchos_social(5)
+    ganchos_recentes = app_db.ultimos_ganchos_social(usuario, 5)
 
     try:
         escolha = content.escolher_e_escrever(
@@ -114,12 +118,12 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
             marca_nome=config["marcaNome"],
         )
     except Exception as e:  # erro de rede/parsing na chamada à Claude
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "erro", "erroDetalhe": f"Falha ao gerar conteúdo: {e}",
         })
 
     if not escolha:
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "sem_decisao",
             "erroDetalhe": "Nenhuma decisão candidata foi considerada qualificada para post.",
         })
@@ -135,7 +139,7 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
         render.render_slide1(escolha["paragrafoDestaque"], caminho1, marca=marca)
         render.render_slide2(escolha["headline2"], escolha["sub2"], caminho2, marca=marca)
     except Exception as e:
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "erro", "decisaoId": escolha["decisaoId"], "titulo": titulo,
             "paragrafoDestaque": escolha["paragrafoDestaque"], "headline2": escolha["headline2"],
             "sub2": escolha["sub2"], "legenda": escolha["legenda"], "gancho": gancho,
@@ -151,7 +155,7 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
             escolha["legenda"],
         )
     except ErroGraphAPI as e:
-        return app_db.inserir_social_post({
+        return app_db.inserir_social_post(usuario, {
             "status": "erro", "decisaoId": escolha["decisaoId"], "titulo": titulo,
             "paragrafoDestaque": escolha["paragrafoDestaque"], "headline2": escolha["headline2"],
             "sub2": escolha["sub2"], "legenda": escolha["legenda"], "gancho": gancho,
@@ -159,8 +163,8 @@ def executar_ciclo(decisoes_candidatas: list[dict], forcar: bool = False) -> dic
             "erroDetalhe": f"Etapa '{e.etapa}': HTTP {e.status_code} - {e.resposta}",
         })
 
-    app_db.marcar_social_decisao_usada(escolha["decisaoId"])
-    return app_db.inserir_social_post({
+    app_db.marcar_social_decisao_usada(usuario, escolha["decisaoId"])
+    return app_db.inserir_social_post(usuario, {
         "status": "publicado", "decisaoId": escolha["decisaoId"], "titulo": titulo,
         "paragrafoDestaque": escolha["paragrafoDestaque"], "headline2": escolha["headline2"],
         "sub2": escolha["sub2"], "legenda": escolha["legenda"], "gancho": gancho,

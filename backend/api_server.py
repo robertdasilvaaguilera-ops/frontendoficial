@@ -308,6 +308,10 @@ def auth_remover_usuario(usuario: str, request: Request):
     if not any(u["usuario"] == usuario for u in auth.listar_usuarios()):
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     auth.remover_usuario(usuario)
+    # Login removido pode ter automação de Mídia Social ativa - recarrega
+    # o agendador agora, não só na próxima alteração de config de alguém,
+    # senão o job continuaria rodando até o próximo redeploy.
+    social_scheduler.recarregar()
     return {"ok": True}
 
 
@@ -676,26 +680,30 @@ class ClientRequest(BaseModel):
 
 
 @app.get("/clients")
-def listar_clientes():
-    return app_db.listar_clientes()
+def listar_clientes(request: Request):
+    usuario = _exigir_sessao(request)
+    return app_db.listar_clientes(usuario)
 
 
 @app.post("/clients")
-def criar_cliente(req: ClientRequest):
+def criar_cliente(req: ClientRequest, request: Request):
+    usuario = _exigir_sessao(request)
     if not req.nome.strip():
         raise HTTPException(status_code=400, detail="Nome do cliente é obrigatório")
-    return app_db.inserir_cliente(req.model_dump())
+    return app_db.inserir_cliente(req.model_dump(), usuario)
 
 
 @app.delete("/clients/{id}")
-def deletar_cliente(id: str):
-    if not app_db.remover_cliente(id):
+def deletar_cliente(id: str, request: Request):
+    usuario = _exigir_sessao(request)
+    if not app_db.remover_cliente(id, usuario):
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
     return {"ok": True}
 
 
 @app.get("/summary")
-def obter_resumo():
+def obter_resumo(request: Request):
+    usuario = _exigir_sessao(request)
     df = _carregar_dados()
     if df.empty:
         return {
@@ -707,7 +715,7 @@ def obter_resumo():
         lambda f: _classificar_fonte_noticia(f) != "Tribunal"
     )
     return {
-        "totalClientes": app_db.contar_clientes(),
+        "totalClientes": app_db.contar_clientes(usuario),
         "oportunidadesHoje": int((df_decisoes.get("risco", 0) < 50).sum()),
         "riscosHoje": int((df_decisoes.get("risco", 0) >= 50).sum()),
         "alteracoesLegislativas": int(legislativas.sum()),
@@ -857,7 +865,7 @@ class ChatRequest(BaseModel):
     conversaId: str | None = None
 
 
-def _exigir_acesso_chat(request: Request) -> None:
+def _exigir_acesso_chat(request: Request) -> str:
     """Checagem "só o nível, sem olhar orçamento" - usada nos endpoints de
     histórico (listar/ler/apagar conversa), que não custam nada de Claude
     então não fazem sentido cortar por orçamento diário, só por nível."""
@@ -865,18 +873,19 @@ def _exigir_acesso_chat(request: Request) -> None:
     nivel = info["nivel"] if info else "basico"
     if not auth.LIMITES_NIVEL.get(nivel, auth.LIMITES_NIVEL["basico"])["chat"]:
         raise HTTPException(status_code=403, detail="Seu nível de acesso não inclui o Copiloto ATLAS.")
+    return info["usuario"]
 
 
 @app.get("/copilot/conversas")
 def listar_conversas(request: Request):
-    _exigir_acesso_chat(request)
-    return app_db.listar_conversas()
+    usuario = _exigir_acesso_chat(request)
+    return app_db.listar_conversas(usuario)
 
 
 @app.get("/copilot/conversas/{id}")
 def obter_conversa(id: str, request: Request):
-    _exigir_acesso_chat(request)
-    conversa = app_db.obter_conversa(id)
+    usuario = _exigir_acesso_chat(request)
+    conversa = app_db.obter_conversa(id, usuario)
     if conversa is None:
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return conversa
@@ -884,8 +893,8 @@ def obter_conversa(id: str, request: Request):
 
 @app.delete("/copilot/conversas/{id}")
 def deletar_conversa(id: str, request: Request):
-    _exigir_acesso_chat(request)
-    if not app_db.remover_conversa(id):
+    usuario = _exigir_acesso_chat(request)
+    if not app_db.remover_conversa(id, usuario):
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return {"ok": True}
 
@@ -951,7 +960,7 @@ def copiloto_chat(req: ChatRequest, request: Request):
         {"role": "assistant", "content": resposta, "fontes": fontes},
     ]
     titulo = req.pergunta.strip()[:80]
-    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas)
+    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas, usuario)
 
     return {
         "resposta": resposta,
@@ -1334,8 +1343,8 @@ def _mascarar_token(token: str) -> str:
 
 @app.get("/social/config")
 def social_obter_config(request: Request):
-    _exigir_sessao(request)
-    config = app_db.obter_social_config()
+    usuario = _exigir_sessao(request)
+    config = app_db.obter_social_config(usuario)
     return {
         **config,
         "igAccessToken": _mascarar_token(config["igAccessToken"]),
@@ -1345,7 +1354,7 @@ def social_obter_config(request: Request):
 
 @app.put("/social/config")
 def social_salvar_config(req: SocialConfigRequest, request: Request):
-    _exigir_sessao(request)
+    usuario = _exigir_sessao(request)
     if req.horarios is not None:
         invalidos = [h for h in req.horarios if not _HORARIO_RE.match(h)]
         if invalidos:
@@ -1364,7 +1373,7 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
     if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
         raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
     if req.corDestaque is not None or req.corFundoEscuro is not None:
-        atual = app_db.obter_social_config()
+        atual = app_db.obter_social_config(usuario)
         _validar_contraste_destaque(
             req.corDestaque if req.corDestaque is not None else atual["corDestaque"],
             req.corFundoEscuro if req.corFundoEscuro is not None else atual["corFundoEscuro"],
@@ -1374,7 +1383,7 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
     # só atualiza se o usuário realmente digitou um novo.
     if "igAccessToken" in dados and not dados["igAccessToken"]:
         dados.pop("igAccessToken")
-    config = app_db.salvar_social_config(dados)
+    config = app_db.salvar_social_config(usuario, dados)
     social_scheduler.recarregar()
     return {
         **config,
@@ -1392,8 +1401,8 @@ class TestarConexaoRequest(BaseModel):
 def social_testar_conexao(req: TestarConexaoRequest, request: Request):
     """Valida token + ID da conta - usa os valores enviados no corpo (tela
     de configuração, antes de salvar) ou, se omitidos, os já salvos."""
-    _exigir_sessao(request)
-    config = app_db.obter_social_config()
+    usuario = _exigir_sessao(request)
+    config = app_db.obter_social_config(usuario)
     token = req.igAccessToken or config["igAccessToken"]
     conta_id = req.igBusinessAccountId or config["igBusinessAccountId"]
     if not token or not conta_id:
@@ -1461,16 +1470,16 @@ async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
     social/render.py) - guardado no mesmo volume persistente das imagens
     geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
     que já existe (a Graph API também precisa alcançar essas URLs)."""
-    _exigir_sessao(request)
+    usuario = _exigir_sessao(request)
     nome_arquivo = await _salvar_imagem_upload(arquivo, "logo")
-    config = app_db.salvar_social_config({"logoPath": nome_arquivo})
+    config = app_db.salvar_social_config(usuario, {"logoPath": nome_arquivo})
     return {"logoPath": config["logoPath"]}
 
 
 @app.delete("/social/logo")
 def social_remover_logo(request: Request):
-    _exigir_sessao(request)
-    config = app_db.salvar_social_config({"logoPath": ""})
+    usuario = _exigir_sessao(request)
+    config = app_db.salvar_social_config(usuario, {"logoPath": ""})
     return {"logoPath": config["logoPath"]}
 
 
@@ -1480,22 +1489,22 @@ async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile =
     sistema escreve o texto gerado por cima, na mesma área/fonte/cor já
     configuradas (ver render._fundo_slide). Substitui o degradê da
     identidade de marca só pra esse slide."""
-    _exigir_sessao(request)
+    usuario = _exigir_sessao(request)
     if slide not in (1, 2):
         raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
     # o fundo cobre a imagem 1080x1350 inteira (ver render._fundo_slide) -
     # abaixo de ~2/3 disso ele fica visivelmente esticado/borrado.
     nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}", resolucao_minima=(720, 900))
-    config = app_db.salvar_social_config({f"fundo{slide}Path": nome_arquivo})
+    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": nome_arquivo})
     return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
 
 
 @app.delete("/social/fundo")
 def social_remover_fundo(request: Request, slide: int):
-    _exigir_sessao(request)
+    usuario = _exigir_sessao(request)
     if slide not in (1, 2):
         raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
-    config = app_db.salvar_social_config({f"fundo{slide}Path": ""})
+    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": ""})
     return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
 
 
@@ -1544,7 +1553,7 @@ def social_preview(req: SocialPreviewRequest, request: Request):
     + overrides não salvos ainda, pra pré-visualizar cor/logo antes de
     clicar em Salvar) - usa um texto fixo de exemplo, nunca uma decisão
     real, então pode ser chamado quantas vezes quiser sem gastar Claude."""
-    _exigir_sessao(request)
+    usuario = _exigir_sessao(request)
     for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
         valor = getattr(req, campo)
         if valor is not None and not _HEX_COR_RE.match(valor):
@@ -1555,7 +1564,7 @@ def social_preview(req: SocialPreviewRequest, request: Request):
         raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
     if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
         raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
-    config = {**app_db.obter_social_config(), **req.model_dump(exclude_unset=True)}
+    config = {**app_db.obter_social_config(usuario), **req.model_dump(exclude_unset=True)}
     marca = social_pipeline.marca_da_config(config)
     nome1, nome2 = "preview_1.png", "preview_2.png"
     social_render.render_slide1(
@@ -1572,8 +1581,8 @@ def social_preview(req: SocialPreviewRequest, request: Request):
 
 @app.get("/social/posts")
 def social_listar_posts(request: Request, limit: int = 30):
-    _exigir_sessao(request)
-    return app_db.listar_social_posts(limit)
+    usuario = _exigir_sessao(request)
+    return app_db.listar_social_posts(usuario, limit)
 
 
 @app.post("/social/run-now")
@@ -1583,7 +1592,7 @@ def social_publicar_agora(request: Request):
     ponta sem esperar o próximo horário. Publica de verdade se as
     credenciais estiverem corretas - não é um modo de simulação."""
     usuario = _exigir_cota_geracao(request)
-    resultado = social_pipeline.executar_ciclo(_decisoes_candidatas_social(25), forcar=True)
+    resultado = social_pipeline.executar_ciclo(usuario, _decisoes_candidatas_social(25), forcar=True)
     auth.registrar_geracao(usuario)
     return resultado
 
