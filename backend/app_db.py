@@ -135,6 +135,8 @@ def iniciar():
             texto_claro INTEGER NOT NULL DEFAULT 1,
             fundo1_path TEXT NOT NULL DEFAULT '',
             fundo2_path TEXT NOT NULL DEFAULT '',
+            posicao_vertical TEXT NOT NULL DEFAULT 'centro',
+            alinhamento TEXT NOT NULL DEFAULT 'centro',
             atualizado_em TEXT
         )
     """)
@@ -229,6 +231,8 @@ def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
         "estilo": "'classico'",
         "fundo1_path": "''",
         "fundo2_path": "''",
+        "posicao_vertical": "'centro'",
+        "alinhamento": "'centro'",
     }
     # f-string aqui é seguro: coluna/default vêm só do dict fixo acima
     # (nunca de entrada externa) - e nomes de coluna não dá pra parametrizar
@@ -627,6 +631,8 @@ _SOCIAL_CONFIG_PADRAO = {
     "textoClaro": True,
     "fundo1Path": "",
     "fundo2Path": "",
+    "posicaoVertical": "centro",
+    "alinhamento": "centro",
 }
 
 
@@ -654,6 +660,8 @@ def obter_social_config() -> dict:
         "textoClaro": bool(linha["texto_claro"]),
         "fundo1Path": linha["fundo1_path"] or "",
         "fundo2Path": linha["fundo2_path"] or "",
+        "posicaoVertical": linha["posicao_vertical"] or "centro",
+        "alinhamento": linha["alinhamento"] or "centro",
     }
 
 
@@ -670,8 +678,8 @@ def salvar_social_config(dados: dict) -> dict:
         INSERT INTO social_config
             (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
              marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path,
-             estilo, texto_claro, fundo1_path, fundo2_path, atualizado_em)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             estilo, texto_claro, fundo1_path, fundo2_path, posicao_vertical, alinhamento, atualizado_em)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
             tom = excluded.tom, horarios = excluded.horarios,
@@ -682,6 +690,7 @@ def salvar_social_config(dados: dict) -> dict:
             cor_destaque = excluded.cor_destaque, logo_path = excluded.logo_path,
             estilo = excluded.estilo, texto_claro = excluded.texto_claro,
             fundo1_path = excluded.fundo1_path, fundo2_path = excluded.fundo2_path,
+            posicao_vertical = excluded.posicao_vertical, alinhamento = excluded.alinhamento,
             atualizado_em = excluded.atualizado_em
         """,
         (
@@ -702,6 +711,8 @@ def salvar_social_config(dados: dict) -> dict:
             int(bool(mesclado["textoClaro"])),
             mesclado["fundo1Path"],
             mesclado["fundo2Path"],
+            mesclado["posicaoVertical"],
+            mesclado["alinhamento"],
             agora,
         ),
     )

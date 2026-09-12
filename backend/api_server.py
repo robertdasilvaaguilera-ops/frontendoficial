@@ -1317,6 +1317,8 @@ class SocialConfigRequest(BaseModel):
     corDestaque: str | None = None
     estilo: str | None = None
     textoClaro: bool | None = None
+    posicaoVertical: str | None = None
+    alinhamento: str | None = None
 
 
 _HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -1357,6 +1359,10 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
             raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
     if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
         raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
+    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
+        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
+    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
+        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
     if req.corDestaque is not None or req.corFundoEscuro is not None:
         atual = app_db.obter_social_config()
         _validar_contraste_destaque(
@@ -1521,6 +1527,8 @@ class SocialPreviewRequest(BaseModel):
     corDestaque: str | None = None
     estilo: str | None = None
     textoClaro: bool | None = None
+    posicaoVertical: str | None = None
+    alinhamento: str | None = None
 
 
 _PARAGRAFO_PREVIEW = (
@@ -1543,6 +1551,10 @@ def social_preview(req: SocialPreviewRequest, request: Request):
             raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
     if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
         raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
+    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
+        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
+    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
+        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
     config = {**app_db.obter_social_config(), **req.model_dump(exclude_unset=True)}
     marca = social_pipeline.marca_da_config(config)
     nome1, nome2 = "preview_1.png", "preview_2.png"

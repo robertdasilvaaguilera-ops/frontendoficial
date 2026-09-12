@@ -51,6 +51,36 @@ def _fontes_da_marca(marca: "Marca") -> tuple[str, str]:
     return FONTES_ESTILOS.get(marca.estilo, FONTES_ESTILOS[ESTILO_PADRAO])
 
 
+# Onde o bloco de texto principal fica na imagem - pensado pra quem já tem
+# um fundo próprio (upload em /social/fundo) cujo espaço em branco não é
+# necessariamente no centro. Afeta o parágrafo/manchete/subtítulo/CTA; o
+# rodapé de marca (traço+nome+@handle) e o traço divisor continuam sempre
+# centralizados - é a assinatura do post, convenção comum mesmo em designs
+# com corpo alinhado à esquerda/direita.
+POSICAO_VERTICAL_PADRAO = "centro"
+POSICOES_VERTICAIS = ("topo", "centro", "rodape")
+ALINHAMENTO_PADRAO = "centro"
+ALINHAMENTOS_HORIZONTAIS = ("esquerda", "centro", "direita")
+_MARGEM_VERTICAL = 100
+_MARGEM_HORIZONTAL = 110
+
+
+def _y0_ancorado(altura_total: float, marca: "Marca") -> float:
+    if marca.posicao_vertical == "topo":
+        return float(_MARGEM_VERTICAL)
+    if marca.posicao_vertical == "rodape":
+        return ALTURA - altura_total - _MARGEM_VERTICAL
+    return (ALTURA - altura_total) / 2
+
+
+def _x0_alinhado(largura_conteudo: float, marca: "Marca") -> float:
+    if marca.alinhamento == "esquerda":
+        return float(_MARGEM_HORIZONTAL)
+    if marca.alinhamento == "direita":
+        return LARGURA - largura_conteudo - _MARGEM_HORIZONTAL
+    return (LARGURA - largura_conteudo) / 2
+
+
 # Cores de texto - claras (fundo escuro, o caso comum) ou escuras (fundo
 # customizado claro, ver Marca.texto_claro). Não fazem parte da identidade
 # de marca configurável em cor (só o par claro/escuro muda, via toggle).
@@ -123,6 +153,8 @@ class Marca:
     texto_claro: bool = True  # False = texto escuro (fundo customizado claro)
     fundo1_path: str | None = None  # imagem de fundo própria (slide 1), no lugar do degradê
     fundo2_path: str | None = None  # idem, slide 2
+    posicao_vertical: str = POSICAO_VERTICAL_PADRAO  # topo | centro | rodape
+    alinhamento: str = ALINHAMENTO_PADRAO  # esquerda | centro | direita
 
 
 MARCA_PADRAO = Marca()
@@ -269,11 +301,12 @@ def _layout_linha(
     fonte_normal: ImageFont.FreeTypeFont,
     fonte_marcada: ImageFont.FreeTypeFont,
     largura_canvas: int,
+    marca: "Marca",
 ) -> tuple[list[float], list[float]]:
-    """Calcula a posição x de cada palavra da linha (centralizada) e a
-    largura de cada uma, JÁ reservando o padding do grifo nas fronteiras
-    marcado/não-marcado - assim o retângulo do destaque nunca precisa
-    "invadir" o espaço de uma palavra vizinha (ver PAD_H)."""
+    """Calcula a posição x de cada palavra da linha (alinhada conforme
+    `marca.alinhamento`) e a largura de cada uma, JÁ reservando o padding do
+    grifo nas fronteiras marcado/não-marcado - assim o retângulo do destaque
+    nunca precisa "invadir" o espaço de uma palavra vizinha (ver PAD_H)."""
     espaco_normal = draw.textlength(" ", font=fonte_normal)
     espaco_marc = draw.textlength(" ", font=fonte_marcada)
     larguras = [
@@ -291,7 +324,7 @@ def _layout_linha(
     borda_ini = PAD_H if linha and linha[0].marcada else 0.0
     borda_fim = PAD_H if linha and linha[-1].marcada else 0.0
     largura_linha = sum(larguras) + sum(gaps_antes) + borda_ini + borda_fim
-    x0 = (largura_canvas - largura_linha) / 2
+    x0 = _x0_alinhado(largura_linha, marca)
 
     xs: list[float] = []
     x_cursor = x0 + borda_ini
@@ -312,16 +345,18 @@ def _desenhar_linha_rica(
     largura_canvas: int,
     cor_normal: tuple[int, int, int],
     cor_destaque: tuple[int, int, int],
+    marca: "Marca",
 ) -> None:
-    """Desenha uma linha centralizada, com grifo na cor de destaque atrás de
-    cada trecho contínuo marcado (equivalente ao `<mark>` +
-    `box-decoration-break: clone` do CSS). `y_baseline_normal` é a linha de
-    base (baseline) do texto não-marcado - se a fonte marcada tiver tamanho
-    diferente (caso do subtítulo do slide 2), o texto marcado é alinhado
-    pela MESMA baseline, não pelo topo, pra não "flutuar" fora do lugar."""
+    """Desenha uma linha alinhada conforme `marca.alinhamento`, com grifo na
+    cor de destaque atrás de cada trecho contínuo marcado (equivalente ao
+    `<mark>` + `box-decoration-break: clone` do CSS). `y_baseline_normal` é a
+    linha de base (baseline) do texto não-marcado - se a fonte marcada tiver
+    tamanho diferente (caso do subtítulo do slide 2), o texto marcado é
+    alinhado pela MESMA baseline, não pelo topo, pra não "flutuar" fora do
+    lugar."""
     if not linha:
         return
-    xs, larguras = _layout_linha(draw, linha, fonte_normal, fonte_marcada, largura_canvas)
+    xs, larguras = _layout_linha(draw, linha, fonte_normal, fonte_marcada, largura_canvas, marca)
     ascent_normal, _ = fonte_normal.getmetrics()
     ascent_marc, _ = fonte_marcada.getmetrics()
     y_topo_normal = y_baseline_normal - ascent_normal
@@ -361,6 +396,7 @@ def _desenhar_paragrafo(
     largura_canvas: int,
     line_height: float,
     cor_destaque: tuple[int, int, int],
+    marca: "Marca",
     cor_texto: tuple[int, int, int] = COR_TEXTO_CLARO,
 ) -> float:
     """Desenha um parágrafo de várias linhas onde marcado/não-marcado usam a
@@ -369,7 +405,7 @@ def _desenhar_paragrafo(
     ascent, _ = fonte.getmetrics()
     y = y_topo
     for linha in linhas:
-        _desenhar_linha_rica(draw, linha, fonte, fonte, y + ascent, largura_canvas, cor_texto, cor_destaque)
+        _desenhar_linha_rica(draw, linha, fonte, fonte, y + ascent, largura_canvas, cor_texto, cor_destaque, marca)
         y += line_height
     return y - y_topo
 
@@ -490,9 +526,9 @@ def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_P
         altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
         if altura_total <= altura_disponivel:
             break
-    y = (ALTURA - altura_total) / 2
+    y = _y0_ancorado(altura_total, marca)
 
-    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque, cor_texto)
+    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque, marca, cor_texto)
     y += 56
     _linha_tracejada(draw, int(y), LARGURA, marca.cor_destaque)
     y += 44
@@ -543,29 +579,28 @@ def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA
         )
         if altura_total <= altura_disponivel:
             break
-    y = (ALTURA - altura_total) / 2
+    y = _y0_ancorado(altura_total, marca)
 
-    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque, cor_texto)
+    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque, marca, cor_texto)
     y += 28
     # sub usa fonte maior/mais pesada pro trecho marcado (baseline alinhada
     # com o resto do subtítulo) - ver _desenhar_linha_rica.
     ascent_sub, _ = fonte_sub.getmetrics()
     for linha in linhas_sub:
         _desenhar_linha_rica(
-            draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, cor_texto_muted, marca.cor_destaque
+            draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, cor_texto_muted, marca.cor_destaque, marca
         )
         y += altura_linha_sub
     y += 52
     _linha_tracejada(draw, int(y), LARGURA, marca.cor_destaque)
     y += 44
 
-    cta_x_centro = LARGURA / 2
     texto_cta_1, texto_cta_2 = "Toque no ", "link da bio"
     texto_cta_3 = f" e conheça a {marca.nome.title()}"
     l1 = draw.textlength(texto_cta_1, font=fonte_cta)
     l2 = draw.textlength(texto_cta_2, font=fonte_cta)
     l3 = draw.textlength(texto_cta_3, font=fonte_cta)
-    x = cta_x_centro - (l1 + l2 + l3) / 2
+    x = _x0_alinhado(l1 + l2 + l3, marca)
     draw.text((x, y), texto_cta_1, font=fonte_cta, fill=cor_texto)
     x += l1
     draw.text((x, y), texto_cta_2, font=fonte_cta, fill=marca.cor_destaque)

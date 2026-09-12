@@ -67,6 +67,8 @@ def marca_da_config(config: dict) -> render.Marca:
         texto_claro=bool(config.get("textoClaro", True)),
         fundo1_path=_caminho_imagem_ou_none(config.get("fundo1Path")),
         fundo2_path=_caminho_imagem_ou_none(config.get("fundo2Path")),
+        posicao_vertical=config.get("posicaoVertical") or render.POSICAO_VERTICAL_PADRAO,
+        alinhamento=config.get("alinhamento") or render.ALINHAMENTO_PADRAO,
     )
 
 

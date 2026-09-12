@@ -32,6 +32,8 @@ export interface SocialConfig {
   textoClaro: boolean; // false = texto escuro (fundo customizado claro)
   fundo1Path: string; // fundo próprio do slide 1 (arte pronta), ou "" = degradê
   fundo2Path: string; // idem, slide 2
+  posicaoVertical: PosicaoVertical;
+  alinhamento: AlinhamentoHorizontal;
 }
 
 export type EstiloTipografico = "classico" | "editorial" | "moderno";
@@ -40,6 +42,21 @@ export const ESTILO_LABEL: Record<EstiloTipografico, string> = {
   classico: "Clássico (serifado elegante)",
   editorial: "Editorial (serifado dramático)",
   moderno: "Moderno (só sans-serif)",
+};
+
+export type PosicaoVertical = "topo" | "centro" | "rodape";
+export type AlinhamentoHorizontal = "esquerda" | "centro" | "direita";
+
+export const POSICAO_VERTICAL_LABEL: Record<PosicaoVertical, string> = {
+  topo: "Topo",
+  centro: "Centro",
+  rodape: "Rodapé",
+};
+
+export const ALINHAMENTO_LABEL: Record<AlinhamentoHorizontal, string> = {
+  esquerda: "Esquerda",
+  centro: "Centro",
+  direita: "Direita",
 };
 
 export interface SocialConfigInput {
@@ -57,6 +74,8 @@ export interface SocialConfigInput {
   corDestaque?: string;
   estilo?: EstiloTipografico;
   textoClaro?: boolean;
+  posicaoVertical?: PosicaoVertical;
+  alinhamento?: AlinhamentoHorizontal;
 }
 
 export async function getSocialConfig(): Promise<SocialConfig> {
@@ -215,6 +234,8 @@ export interface SocialPreviewInput {
   corDestaque?: string;
   estilo?: EstiloTipografico;
   textoClaro?: boolean;
+  posicaoVertical?: PosicaoVertical;
+  alinhamento?: AlinhamentoHorizontal;
 }
 
 export interface SocialPreviewResultado {

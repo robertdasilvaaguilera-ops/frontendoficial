@@ -28,9 +28,13 @@ import {
   gerarIdentidadeIA,
   gerarPreview,
   ESTILO_LABEL,
+  POSICAO_VERTICAL_LABEL,
+  ALINHAMENTO_LABEL,
   type SocialConfig,
   type SocialPost,
   type EstiloTipografico,
+  type PosicaoVertical,
+  type AlinhamentoHorizontal,
 } from "@/lib/social-api";
 
 export const Route = createFileRoute("/midia-social")({
@@ -87,6 +91,8 @@ function MidiaSocialAdmin() {
 
   const [estilo, setEstilo] = useState<EstiloTipografico>(config.estilo);
   const [textoClaro, setTextoClaro] = useState(config.textoClaro);
+  const [posicaoVertical, setPosicaoVertical] = useState<PosicaoVertical>(config.posicaoVertical);
+  const [alinhamento, setAlinhamento] = useState<AlinhamentoHorizontal>(config.alinhamento);
   const [fundo1Path, setFundo1Path] = useState(config.fundo1Path);
   const [fundo2Path, setFundo2Path] = useState(config.fundo2Path);
   const fundo1InputRef = useRef<HTMLInputElement>(null);
@@ -153,6 +159,8 @@ function MidiaSocialAdmin() {
         corDestaque,
         estilo,
         textoClaro,
+        posicaoVertical,
+        alinhamento,
       });
       setIgToken("");
       setIgContaId(salvo.igBusinessAccountId);
@@ -163,6 +171,8 @@ function MidiaSocialAdmin() {
       setCorDestaque(salvo.corDestaque);
       setEstilo(salvo.estilo);
       setTextoClaro(salvo.textoClaro);
+      setPosicaoVertical(salvo.posicaoVertical);
+      setAlinhamento(salvo.alinhamento);
       await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
       setSucesso("Configuração salva.");
     } catch (err) {
@@ -207,7 +217,10 @@ function MidiaSocialAdmin() {
     setGerandoPreview(true);
     setErro(null);
     try {
-      const r = await gerarPreview({ marcaNome, marcaHandle, corFundoClaro, corFundoEscuro, corDestaque, estilo, textoClaro });
+      const r = await gerarPreview({
+        marcaNome, marcaHandle, corFundoClaro, corFundoEscuro, corDestaque, estilo, textoClaro,
+        posicaoVertical, alinhamento,
+      });
       const cacheBuster = `?t=${Date.now()}`;
       setPreview({
         img1: `${imagemSocialUrl(r.imagem1Path)}${cacheBuster}`,
@@ -561,6 +574,53 @@ function MidiaSocialAdmin() {
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           Já tem uma arte pronta pro post? Suba aqui - o texto gerado é escrito por cima dela, no
           lugar do degradê. Sem upload, usa as cores de fundo configuradas acima.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Posição vertical do texto
+            </label>
+            <div className="mt-1.5 grid grid-cols-3 gap-2">
+              {(Object.keys(POSICAO_VERTICAL_LABEL) as PosicaoVertical[]).map((opcao) => (
+                <button
+                  key={opcao}
+                  onClick={() => setPosicaoVertical(opcao)}
+                  className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
+                    posicaoVertical === opcao
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:bg-accent/40"
+                  }`}
+                >
+                  {POSICAO_VERTICAL_LABEL[opcao]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+              Alinhamento do texto
+            </label>
+            <div className="mt-1.5 grid grid-cols-3 gap-2">
+              {(Object.keys(ALINHAMENTO_LABEL) as AlinhamentoHorizontal[]).map((opcao) => (
+                <button
+                  key={opcao}
+                  onClick={() => setAlinhamento(opcao)}
+                  className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${
+                    alinhamento === opcao
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:bg-accent/40"
+                  }`}
+                >
+                  {ALINHAMENTO_LABEL[opcao]}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          Útil pra encaixar o texto no espaço em branco do seu fundo próprio - ex: modelo com foto
+          em cima e área livre embaixo à esquerda.
         </p>
 
         <div className="mt-4">
