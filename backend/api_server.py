@@ -74,6 +74,15 @@ app_db.iniciar()
 # quem já está deslogado), e a raiz (só devolve a lista de endpoints, sem
 # dado nenhum do usuário).
 _ROTAS_PUBLICAS = {"/", "/auth/status", "/auth/setup", "/auth/login", "/auth/logout"}
+# Cookie de sessão entre origens diferentes (front e backend em subdomínios
+# distintos do Railway) só é enviado pelo navegador em fetch/XHR com
+# SameSite=None + Secure - "Lax" (o padrão de dev, front e back em
+# localhost) bloqueia isso silenciosamente (login "funciona" na chamada,
+# mas o cookie nunca volta na requisição seguinte). ATLAS_COOKIE_SECURE=true
+# liga esse modo em produção; local (http://) continua em Lax sem Secure,
+# já que Secure exige HTTPS.
+_COOKIE_SECURE = os.getenv("ATLAS_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes")
+_COOKIE_SAMESITE = "none" if _COOKIE_SECURE else "lax"
 # Prefixo servido sem login: as imagens do post automático de Instagram
 # precisam ser buscáveis publicamente pelos servidores da Meta (Graph API),
 # que não têm cookie de sessão nenhum - mesmo princípio de antes (ver
@@ -94,6 +103,12 @@ async def exigir_login(request: Request, call_next):
     return await call_next(request)
 
 
+# Origens de produção do frontend (ex: https://atlas-frontend-production-
+# b12b.up.railway.app) - lista separada por vírgula em ATLAS_CORS_ORIGINS,
+# configurada no Railway. Sem isso, só localhost funcionava (ver regex
+# abaixo) - o frontend implantado não conseguia nem fazer login.
+_ORIGENS_PRODUCAO = [o.strip() for o in os.getenv("ATLAS_CORS_ORIGINS", "").split(",") if o.strip()]
+
 # CORSMiddleware precisa ser adicionada DEPOIS de exigir_login (ordem
 # textual = ordem de "quem embrulha quem": o último add_middleware fica
 # por fora) - senão uma resposta 401 do exigir_login sai sem cabeçalho
@@ -103,9 +118,12 @@ async def exigir_login(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     # allow_origins=["*"] não é permitido pelo navegador junto de
-    # allow_credentials=True (precisa do cookie de sessão do login) - regex
-    # cobre qualquer porta em localhost/127.0.0.1, já que o front roda em
-    # dev numa porta que pode variar.
+    # allow_credentials=True (precisa do cookie de sessão do login) - origens
+    # de produção vêm de ATLAS_CORS_ORIGINS (lista exata); regex cobre
+    # qualquer porta em localhost/127.0.0.1, já que o front roda em dev numa
+    # porta que pode variar. CORSMiddleware libera se QUALQUER um dos dois
+    # bater com a origem da requisição.
+    allow_origins=_ORIGENS_PRODUCAO,
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
@@ -204,10 +222,7 @@ def auth_setup(req: SetupRequest):
     auth.criar_primeiro_usuario(usuario, req.senha)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
-    resposta.set_cookie(
-        NOME_COOKIE_SESSAO, token, httponly=True, samesite="lax",
-        max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
-    )
+    _definir_cookie_sessao(resposta, token)
     return resposta
 
 
@@ -218,10 +233,7 @@ def auth_login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
-    resposta.set_cookie(
-        NOME_COOKIE_SESSAO, token, httponly=True, samesite="lax",
-        max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
-    )
+    _definir_cookie_sessao(resposta, token)
     return resposta
 
 
@@ -229,8 +241,16 @@ def auth_login(req: LoginRequest):
 def auth_logout(request: Request):
     auth.encerrar_sessao(request.cookies.get(NOME_COOKIE_SESSAO))
     resposta = JSONResponse({"ok": True})
-    resposta.delete_cookie(NOME_COOKIE_SESSAO)
+    resposta.delete_cookie(NOME_COOKIE_SESSAO, samesite=_COOKIE_SAMESITE, secure=_COOKIE_SECURE)
     return resposta
+
+
+def _definir_cookie_sessao(resposta: JSONResponse, token: str) -> None:
+    resposta.set_cookie(
+        NOME_COOKIE_SESSAO, token, httponly=True,
+        samesite=_COOKIE_SAMESITE, secure=_COOKIE_SECURE,
+        max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
+    )
 
 
 @app.get("/auth/users")
