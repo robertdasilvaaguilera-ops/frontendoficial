@@ -17,6 +17,8 @@ from collectors import receita, pgfn, stj, carf_julgamentos, carf_acordaos_live,
 from filters.keywords import contem_palavra_chave, classificar
 from classifier.opportunity import classify
 from database.database import criar_banco, inserir
+from database.setores import criar_tabela_setores
+from database.temas import criar_tabela_temas
 from economics.estimator import estimate
 from economics.indice_atlas import calcular_indice_atlas
 from recommender import recomendar
@@ -146,8 +148,24 @@ def salvar_no_excel(novas_entradas: list[dict]) -> None:
 
 def main():
     print(f"=== ATLAS Engine - execucao em {datetime.now().isoformat()} ===\n")
-        
+
     criar_banco()
+    # database/setores.py e database/temas.py guardam a tabela num arquivo
+    # sqlite local (database/atlas.db), fora do volume persistente - nos
+    # deploys antigos (`railway up`, upload direto) esse arquivo ia junto
+    # já populado; desde que os deploys passaram a ser via git (rebuild do
+    # zero a cada deploy - ver commit "Persist app data across deploys"),
+    # esse arquivo nasce vazio em todo container novo, e a run inteira de
+    # coleta quebrava em silêncio: buscar_setor_por_texto (chamado por
+    # estimate(), dentro de filtrar_e_classificar) tentava um SELECT numa
+    # tabela que nunca tinha sido criada, e a exceção não tratada abortava
+    # a coleta ANTES de salvar Excel/vistos.json - nenhuma decisão nova
+    # nunca chegava a ser gravada, mesmo com a coleta rodando 3x/dia sem
+    # erro nenhum visível na tela. Recriar aqui (idempotente, dados fixos)
+    # garante que a tabela sempre existe nesta execução, não depende de
+    # alguém ter rodado "python database/setores.py" manualmente antes.
+    criar_tabela_setores()
+    criar_tabela_temas()
 
     vistos = carregar_vistos()
     entradas = coletar_tudo()
