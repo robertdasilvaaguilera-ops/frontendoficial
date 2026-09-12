@@ -52,19 +52,22 @@ from ai import (
 )
 import app_db
 import auth
+import coleta_scheduler
+import main as atlas_engine
 from social import pipeline as social_pipeline
 from social import scheduler as social_scheduler
 from social.instagram import ErroGraphAPI, testar_conexao as testar_conexao_instagram
 
-PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
-CAMINHO_EXCEL = os.path.join(PASTA_BASE, "reports", "oportunidades.xlsx")
+import paths
+
+CAMINHO_EXCEL = paths.caminho("reports", "oportunidades.xlsx")
 # pd.read_excel (via openpyxl, parser XML puro-Python) leva vários segundos
 # nesse arquivo (milhares de linhas) - inaceitável pagar esse custo em toda
 # reinicialização do backend. Este cache local guarda o DataFrame já
 # processado; só é invalidado quando o .xlsx muda de verdade (mtime
 # diferente do gravado junto com o cache), então reinicializações "normais"
 # (sem coleta nova de dados) carregam quase instantaneamente.
-CAMINHO_CACHE_DADOS = os.path.join(PASTA_BASE, "reports", ".oportunidades_cache.pkl")
+CAMINHO_CACHE_DADOS = paths.caminho("reports", ".oportunidades_cache.pkl")
 
 app = FastAPI(title="ATLAS API")
 app_db.iniciar()
@@ -382,6 +385,9 @@ def _aquecer_cache_no_boot():
     # (não o módulo social) porque é ela quem sabe montar a lista de
     # decisões candidatas a partir do DataFrame carregado acima.
     social_scheduler.iniciar(lambda: _decisoes_candidatas_social(25))
+    # Coleta diária de decisões (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN),
+    # 3x/dia, dentro do próprio serviço - ver coleta_scheduler.py.
+    coleta_scheduler.iniciar()
 
 
 def _decisoes_candidatas_social(limit: int = 25) -> list[dict]:
@@ -1197,6 +1203,24 @@ def gerar_parecer_endpoint(id: str, req: ParecerRequest, request: Request):
     return resultado
 
 
+# --- Coleta de decisões (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN) --------------
+# Roda sozinha 3x/dia (ver coleta_scheduler.py); este endpoint só existe pra
+# forçar uma rodada na hora (ex: logo após configurar o sistema, sem
+# precisar esperar o próximo horário agendado), igual ao "Publicar agora"
+# da Mídia Social. Só admin - pode demorar bastante (a coleta varre várias
+# fontes externas antes de responder).
+@app.post("/admin/coletar-decisoes-agora")
+def admin_coletar_decisoes_agora(request: Request):
+    _exigir_admin(request)
+    try:
+        atlas_engine.main()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha na coleta: {e}")
+    # _carregar_dados() já detecta sozinha que o Excel mudou (mtime) e relê -
+    # não precisa invalidar nada aqui manualmente.
+    return {"ok": True}
+
+
 # --- Mídia Social (automação de posts de Instagram) -----------------------
 # Aba "Mídia Social": o usuário configura temas/objetivos/tom, horários e as
 # credenciais do Instagram; o backend gera e publica os posts sozinho, nos
@@ -1327,5 +1351,6 @@ def raiz():
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
             "/auth/users",
             "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
+            "/admin/coletar-decisoes-agora",
         ],
     }

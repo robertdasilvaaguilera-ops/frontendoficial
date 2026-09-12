@@ -12,11 +12,17 @@ import re
 import uuid
 
 import app_db
+import paths
 from social import content, render
 from social.instagram import ErroGraphAPI, publicar_carrossel
 
-PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
-PASTA_IMAGENS = os.path.join(PASTA_BASE, "output")
+# Fica no mesmo volume persistente que o banco/Excel (ver paths.py) - sem
+# isso, o histórico da Mídia Social continuava certo no banco, mas as
+# miniaturas das imagens sumiam (404) depois do primeiro redeploy seguinte.
+# paths.caminho() só garante o diretório PAI (é pensado pra caminho de
+# arquivo) - aqui o próprio "social_output" é o diretório, então precisa
+# do makedirs explícito.
+PASTA_IMAGENS = os.path.join(paths.DIR_DADOS, "social_output")
 os.makedirs(PASTA_IMAGENS, exist_ok=True)
 
 URL_BASE_PUBLICA = os.getenv(

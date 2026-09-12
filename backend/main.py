@@ -21,10 +21,10 @@ from economics.estimator import estimate
 from economics.indice_atlas import calcular_indice_atlas
 from recommender import recomendar
 from ai.legenda_instagram import gerar_legenda_instagram
+import paths
 
-PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
-CAMINHO_EXCEL = os.path.join(PASTA_BASE, "reports", "oportunidades.xlsx")
-CAMINHO_VISTOS = os.path.join(PASTA_BASE, "logs", "vistos.json")
+CAMINHO_EXCEL = paths.caminho("reports", "oportunidades.xlsx")
+CAMINHO_VISTOS = paths.caminho("logs", "vistos.json")
 
 # Parecer/analise estruturada nao rodam mais aqui em lote (eram Gemini,
 # removidos - ver ai/parecer.py). Agora sao gerados sob demanda pela API

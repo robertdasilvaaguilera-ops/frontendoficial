@@ -10,17 +10,16 @@ resto do backend: direto e fácil de inspecionar (basta abrir com
 `sqlite3 database/atlas_app.db`).
 """
 import json
-import os
 import sqlite3
 import time
 import uuid
 
-PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
-CAMINHO_DB = os.path.join(PASTA_BASE, "database", "atlas_app.db")
+import paths
+
+CAMINHO_DB = paths.caminho("database", "atlas_app.db")
 
 
 def _conectar():
-    os.makedirs(os.path.dirname(CAMINHO_DB), exist_ok=True)
     conn = sqlite3.connect(CAMINHO_DB)
     conn.row_factory = sqlite3.Row
     return conn
