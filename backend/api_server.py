@@ -57,6 +57,7 @@ import app_db
 import auth
 import coleta_scheduler
 import main as atlas_engine
+from social import content as social_content
 from social import pipeline as social_pipeline
 from social import render as social_render
 from social import scheduler as social_scheduler
@@ -1269,6 +1270,8 @@ class SocialConfigRequest(BaseModel):
     corFundoClaro: str | None = None
     corFundoEscuro: str | None = None
     corDestaque: str | None = None
+    estilo: str | None = None
+    textoClaro: bool | None = None
 
 
 _HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -1307,6 +1310,8 @@ def social_salvar_config(req: SocialConfigRequest, request: Request):
         valor = getattr(req, campo)
         if valor is not None and not _HEX_COR_RE.match(valor):
             raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
+    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
+        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
     dados = req.model_dump(exclude_unset=True)
     # campo vazio no form de token não deve apagar o token já salvo -
     # só atualiza se o usuário realmente digitou um novo.
@@ -1346,7 +1351,24 @@ def social_testar_conexao(req: TestarConexaoRequest, request: Request):
     return {"ok": True, "username": info.get("username"), "nome": info.get("name")}
 
 
-_EXTENSOES_LOGO = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+_EXTENSOES_IMAGEM = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+_TAMANHO_MAX_IMAGEM = 5 * 1024 * 1024
+
+
+async def _salvar_imagem_upload(arquivo: UploadFile, prefixo: str) -> str:
+    """Valida tipo/tamanho e grava no volume persistente (PASTA_IMAGENS,
+    servido publicamente por /social/imagem/{nome}) - usado tanto pelo logo
+    quanto pelos fundos customizados. Devolve o nome do arquivo salvo."""
+    extensao = _EXTENSOES_IMAGEM.get(arquivo.content_type)
+    if not extensao:
+        raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
+    conteudo = await arquivo.read()
+    if len(conteudo) > _TAMANHO_MAX_IMAGEM:
+        raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 5MB)")
+    nome_arquivo = f"{prefixo}_{uuid.uuid4().hex}{extensao}"
+    with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
+        f.write(conteudo)
+    return nome_arquivo
 
 
 @app.post("/social/logo")
@@ -1356,15 +1378,7 @@ async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
     geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
     que já existe (a Graph API também precisa alcançar essas URLs)."""
     _exigir_admin(request)
-    extensao = _EXTENSOES_LOGO.get(arquivo.content_type)
-    if not extensao:
-        raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
-    conteudo = await arquivo.read()
-    if len(conteudo) > 3 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Logo muito grande (máximo 3MB)")
-    nome_arquivo = f"logo_{uuid.uuid4().hex}{extensao}"
-    with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
-        f.write(conteudo)
+    nome_arquivo = await _salvar_imagem_upload(arquivo, "logo")
     config = app_db.salvar_social_config({"logoPath": nome_arquivo})
     return {"logoPath": config["logoPath"]}
 
@@ -1376,12 +1390,57 @@ def social_remover_logo(request: Request):
     return {"logoPath": config["logoPath"]}
 
 
+@app.post("/social/fundo")
+async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile = File(...)):
+    """Fundo próprio do escritório (arte já pronta) pro slide 1 ou 2 - o
+    sistema escreve o texto gerado por cima, na mesma área/fonte/cor já
+    configuradas (ver render._fundo_slide). Substitui o degradê da
+    identidade de marca só pra esse slide."""
+    _exigir_admin(request)
+    if slide not in (1, 2):
+        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
+    nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}")
+    config = app_db.salvar_social_config({f"fundo{slide}Path": nome_arquivo})
+    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
+
+
+@app.delete("/social/fundo")
+def social_remover_fundo(request: Request, slide: int):
+    _exigir_admin(request)
+    if slide not in (1, 2):
+        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
+    config = app_db.salvar_social_config({f"fundo{slide}Path": ""})
+    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
+
+
+class SocialIdentidadeIARequest(BaseModel):
+    descricao: str
+
+
+@app.post("/social/gerar-identidade")
+def social_gerar_identidade(req: SocialIdentidadeIARequest, request: Request):
+    """Traduz uma descrição em texto livre (ex: "quero algo elegante, vinho
+    e dourado") em cores + estilo tipográfico sugeridos - preenche o
+    formulário, mas não salva nem publica nada sozinho (o usuário revisa,
+    gera prévia e só então clica em Salvar)."""
+    _exigir_admin(request)
+    descricao = req.descricao.strip()
+    if not descricao:
+        raise HTTPException(status_code=400, detail="Descreva a identidade visual que você imagina")
+    try:
+        return social_content.gerar_identidade_visual(descricao)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar identidade com IA: {e}")
+
+
 class SocialPreviewRequest(BaseModel):
     marcaNome: str | None = None
     marcaHandle: str | None = None
     corFundoClaro: str | None = None
     corFundoEscuro: str | None = None
     corDestaque: str | None = None
+    estilo: str | None = None
+    textoClaro: bool | None = None
 
 
 _PARAGRAFO_PREVIEW = (
@@ -1402,6 +1461,8 @@ def social_preview(req: SocialPreviewRequest, request: Request):
         valor = getattr(req, campo)
         if valor is not None and not _HEX_COR_RE.match(valor):
             raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
+    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
+        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
     config = {**app_db.obter_social_config(), **req.model_dump(exclude_unset=True)}
     marca = social_pipeline.marca_da_config(config)
     nome1, nome2 = "preview_1.png", "preview_2.png"
@@ -1459,7 +1520,7 @@ def raiz():
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
             "/auth/users",
             "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
-            "/social/logo", "/social/preview",
+            "/social/logo", "/social/fundo", "/social/preview", "/social/gerar-identidade",
             "/admin/coletar-decisoes-agora",
         ],
     }

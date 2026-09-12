@@ -44,22 +44,29 @@ def _url_publica_imagem(nome_arquivo: str) -> str:
     return f"{URL_BASE_PUBLICA}/social/imagem/{nome_arquivo}"
 
 
+def _caminho_imagem_ou_none(nome_arquivo: str | None) -> str | None:
+    if not nome_arquivo:
+        return None
+    caminho = os.path.join(PASTA_IMAGENS, nome_arquivo)
+    return caminho if os.path.isfile(caminho) else None
+
+
 def marca_da_config(config: dict) -> render.Marca:
     """Monta a identidade visual (`render.Marca`) a partir da configuração
     salva pelo usuário na aba Mídia Social - cada perfil tem seu próprio
-    nome, @handle, cores e logo (ver /social/config e /social/logo)."""
-    logo_path = None
-    if config.get("logoPath"):
-        caminho = os.path.join(PASTA_IMAGENS, config["logoPath"])
-        if os.path.isfile(caminho):
-            logo_path = caminho
+    nome, @handle, cores, fontes, fundo e logo (ver /social/config,
+    /social/logo e /social/fundo)."""
     return render.Marca(
         nome=config.get("marcaNome") or "ATLAS",
         handle=config.get("marcaHandle") or "@atlas.tributos",
         cor_destaque=render.hex_para_rgb(config.get("corDestaque"), render.MARCA_PADRAO.cor_destaque),
         cor_fundo_claro=render.hex_para_rgb(config.get("corFundoClaro"), render.MARCA_PADRAO.cor_fundo_claro),
         cor_fundo_escuro=render.hex_para_rgb(config.get("corFundoEscuro"), render.MARCA_PADRAO.cor_fundo_escuro),
-        logo_path=logo_path,
+        logo_path=_caminho_imagem_ou_none(config.get("logoPath")),
+        estilo=config.get("estilo") or render.ESTILO_PADRAO,
+        texto_claro=bool(config.get("textoClaro", True)),
+        fundo1_path=_caminho_imagem_ou_none(config.get("fundo1Path")),
+        fundo2_path=_caminho_imagem_ou_none(config.get("fundo2Path")),
     )
 
 

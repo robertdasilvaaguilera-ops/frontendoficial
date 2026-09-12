@@ -24,20 +24,47 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 _PASTA = os.path.dirname(os.path.abspath(__file__))
 _FONTE_LORA = os.path.join(_PASTA, "fonts", "Lora-Variable.ttf")
 _FONTE_PLEX = os.path.join(_PASTA, "fonts", "IBMPlexSans-Variable.ttf")
+_FONTE_PLAYFAIR = os.path.join(_PASTA, "fonts", "PlayfairDisplay-Variable.ttf")
+_FONTE_INTER = os.path.join(_PASTA, "fonts", "Inter-Variable.ttf")
 
 LARGURA = 1080
 ALTURA = 1350
 
-# Cores fixas de texto (não fazem parte da identidade de marca - contraste
-# alto sobre qualquer fundo escuro segue funcionando bem).
-COR_TEXTO = (245, 241, 230)  # #F5F1E6
-COR_TEXTO_MUTED = (201, 196, 180)  # #C9C4B4
-COR_TEXTO_SOBRE_DESTAQUE = (20, 21, 28)  # #14151C
+# Estilos tipográficos curados (título, corpo) - conjunto fechado de
+# propósito: garante que qualquer combinação escolhida (manualmente ou pela
+# IA em /social/gerar-identidade) sempre fica com aparência profissional,
+# em vez de liberar qualquer fonte do sistema.
+ESTILO_PADRAO = "classico"
+FONTES_ESTILOS: dict[str, tuple[str, str]] = {
+    "classico": (_FONTE_LORA, _FONTE_PLEX),  # serifado clássico + sans neutro (identidade original da Atlas)
+    "editorial": (_FONTE_PLAYFAIR, _FONTE_PLEX),  # serifado editorial, mais dramático
+    "moderno": (_FONTE_INTER, _FONTE_INTER),  # só sans, limpo e corporativo
+}
+
+
+def _fontes_da_marca(marca: "Marca") -> tuple[str, str]:
+    return FONTES_ESTILOS.get(marca.estilo, FONTES_ESTILOS[ESTILO_PADRAO])
+
+
+# Cores de texto - claras (fundo escuro, o caso comum) ou escuras (fundo
+# customizado claro, ver Marca.texto_claro). Não fazem parte da identidade
+# de marca configurável em cor (só o par claro/escuro muda, via toggle).
+COR_TEXTO_CLARO = (245, 241, 230)  # #F5F1E6
+COR_TEXTO_CLARO_MUTED = (201, 196, 180)  # #C9C4B4
+COR_TEXTO_ESCURO = (26, 24, 20)  # #1A1814
+COR_TEXTO_ESCURO_MUTED = (90, 86, 78)  # #5A564E
+COR_TEXTO_SOBRE_DESTAQUE = (20, 21, 28)  # #14151C - texto dentro do grifo, sempre escuro
+
+
+def _cores_texto_da_marca(marca: "Marca") -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    if marca.texto_claro:
+        return COR_TEXTO_CLARO, COR_TEXTO_CLARO_MUTED
+    return COR_TEXTO_ESCURO, COR_TEXTO_ESCURO_MUTED
 
 # Padding horizontal/vertical do grifo dourado atrás de um trecho marcado -
 # equivalente ao `padding: 2px 8px` do CSS original. Diferente do CSS (onde
@@ -92,6 +119,10 @@ class Marca:
     cor_fundo_claro: tuple[int, int, int] = field(default=(23, 27, 36))  # #171B24
     cor_fundo_escuro: tuple[int, int, int] = field(default=(11, 13, 18))  # #0B0D12
     logo_path: str | None = None  # caminho absoluto no disco, ou None
+    estilo: str = ESTILO_PADRAO  # ver FONTES_ESTILOS
+    texto_claro: bool = True  # False = texto escuro (fundo customizado claro)
+    fundo1_path: str | None = None  # imagem de fundo própria (slide 1), no lugar do degradê
+    fundo2_path: str | None = None  # idem, slide 2
 
 
 MARCA_PADRAO = Marca()
@@ -134,6 +165,23 @@ def _gradiente_radial(
             b = round(cor_clara[2] + (cor_escura[2] - cor_clara[2]) * t)
             px[x, y] = (r, g, b)
     return img
+
+
+def _fundo_imagem(caminho: str) -> Image.Image:
+    """Fundo próprio do usuário (upload em /social/fundo) - recorta e
+    redimensiona preenchendo o quadro (equivalente a `object-fit: cover`),
+    pra funcionar independente da proporção original do arquivo enviado."""
+    img = Image.open(caminho).convert("RGB")
+    return ImageOps.fit(img, (LARGURA, ALTURA), method=Image.LANCZOS)
+
+
+def _fundo_slide(marca: "Marca", fundo_path: str | None, centro_pct: tuple[float, float]) -> Image.Image:
+    if fundo_path and os.path.isfile(fundo_path):
+        try:
+            return _fundo_imagem(fundo_path)
+        except Exception:
+            pass  # arquivo corrompido/formato inesperado - cai pro degradê
+    return _gradiente_radial((LARGURA, ALTURA), centro_pct, marca.cor_fundo_claro, marca.cor_fundo_escuro)
 
 
 @dataclass
@@ -293,7 +341,7 @@ def _desenhar_paragrafo(
     largura_canvas: int,
     line_height: float,
     cor_destaque: tuple[int, int, int],
-    cor_texto: tuple[int, int, int] = COR_TEXTO,
+    cor_texto: tuple[int, int, int] = COR_TEXTO_CLARO,
 ) -> float:
     """Desenha um parágrafo de várias linhas onde marcado/não-marcado usam a
     MESMA fonte (só muda a cor) - caso do parágrafo de destaque e da
@@ -313,6 +361,8 @@ def _desenhar_marca(
     `.brand` do template HTML original, só que com nome/handle/cor/logo
     configuráveis por perfil em vez de fixos na Atlas. Devolve a altura
     ocupada."""
+    _, fonte_corpo_path = _fontes_da_marca(marca)
+    _, cor_texto_muted = _cores_texto_da_marca(marca)
     y = y_topo
     largura_tra_co = 90
     x_centro = largura_canvas / 2
@@ -339,13 +389,14 @@ def _desenhar_marca(
             marca = Marca(**{**marca.__dict__, "logo_path": None})
 
     if not marca.logo_path or not os.path.isfile(marca.logo_path or ""):
-        fonte_nome = _fonte(_FONTE_LORA, round(38 * escala), b"Bold")
+        fonte_titulo_path, _ = _fontes_da_marca(marca)
+        fonte_nome = _fonte(fonte_titulo_path, round(38 * escala), b"Bold")
         _desenhar_texto_com_tracking(draw, marca.nome.upper(), fonte_nome, x_centro, y, 2, marca.cor_destaque)
         y += fonte_nome.getbbox(marca.nome.upper())[3] + 8 * escala
 
-    fonte_sub = _fonte(_FONTE_PLEX, round(20 * escala), b"SemiBold")
+    fonte_sub = _fonte(fonte_corpo_path, round(20 * escala), b"SemiBold")
     sub = marca.handle.upper()
-    _desenhar_texto_com_tracking(draw, sub, fonte_sub, x_centro, y, 7, COR_TEXTO_MUTED)
+    _desenhar_texto_com_tracking(draw, sub, fonte_sub, x_centro, y, 7, cor_texto_muted)
     y += fonte_sub.getbbox(sub)[3] + 20 * escala
 
     draw.line(
@@ -392,10 +443,12 @@ def _linha_tracejada(
 
 def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
     """Imagem 1: parágrafo de destaque (regra + pegadinha) + marca do perfil."""
-    img = _gradiente_radial((LARGURA, ALTURA), (0.15, 0.0), marca.cor_fundo_claro, marca.cor_fundo_escuro)
+    img = _fundo_slide(marca, marca.fundo1_path, (0.15, 0.0))
     draw = ImageDraw.Draw(img)
+    fonte_titulo_path, _ = _fontes_da_marca(marca)
+    cor_texto, _ = _cores_texto_da_marca(marca)
 
-    fonte_par = _fonte(_FONTE_LORA, 42, b"Bold")
+    fonte_par = _fonte(fonte_titulo_path, 42, b"Bold")
     largura_max_texto = 830
     linhas = _quebrar_linhas(draw, _preparar_palavras(paragrafo_destaque), fonte_par, largura_max_texto)
     line_height = round(42 * 1.5)
@@ -407,7 +460,7 @@ def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_P
     altura_total = altura_paragrafo + altura_divisor_bloco + altura_marca
     y = (ALTURA - altura_total) / 2
 
-    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque)
+    y += _desenhar_paragrafo(draw, linhas, fonte_par, y, LARGURA, line_height, marca.cor_destaque, cor_texto)
     y += 56
     _linha_tracejada(draw, int(y), LARGURA, marca.cor_destaque)
     y += 44
@@ -419,22 +472,24 @@ def render_slide1(paragrafo_destaque: str, out_path: str, marca: Marca = MARCA_P
 def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA_PADRAO) -> None:
     """Imagem 2: manchete fixa + subtítulo (com o crédito ao perfil grifado) +
     CTA pro link da bio + marca do perfil."""
-    img = _gradiente_radial((LARGURA, ALTURA), (0.85, 1.0), marca.cor_fundo_claro, marca.cor_fundo_escuro)
+    img = _fundo_slide(marca, marca.fundo2_path, (0.85, 1.0))
     draw = ImageDraw.Draw(img)
+    fonte_titulo_path, fonte_corpo_path = _fontes_da_marca(marca)
+    cor_texto, cor_texto_muted = _cores_texto_da_marca(marca)
 
-    fonte_headline = _fonte(_FONTE_LORA, 40, b"Bold")
+    fonte_headline = _fonte(fonte_titulo_path, 40, b"Bold")
     # `white-space: nowrap` no template original - headline é sempre 1 linha só.
     linhas_headline = [_preparar_palavras(headline2)]
     altura_headline = round(40 * 1.25)
 
-    fonte_sub = _fonte(_FONTE_PLEX, 25, b"Regular")
-    fonte_sub_mark = _fonte(_FONTE_PLEX, 29, b"Bold")
+    fonte_sub = _fonte(fonte_corpo_path, 25, b"Regular")
+    fonte_sub_mark = _fonte(fonte_corpo_path, 29, b"Bold")
     largura_max_sub = 660
     linhas_sub = _quebrar_linhas(draw, _preparar_palavras(sub2), fonte_sub, largura_max_sub)
     altura_linha_sub = round(25 * 1.55)
     altura_sub = altura_linha_sub * len(linhas_sub)
 
-    fonte_cta = _fonte(_FONTE_PLEX, 28, b"SemiBold")
+    fonte_cta = _fonte(fonte_corpo_path, 28, b"SemiBold")
     altura_cta = fonte_cta.getbbox("Ag")[3]
 
     altura_marca = 20 + 34 + 8 + 18 + 20 + 3
@@ -443,14 +498,14 @@ def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA
     )
     y = (ALTURA - altura_total) / 2
 
-    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque)
+    y += _desenhar_paragrafo(draw, linhas_headline, fonte_headline, y, LARGURA, altura_headline, marca.cor_destaque, cor_texto)
     y += 28
     # sub usa fonte maior/mais pesada pro trecho marcado (baseline alinhada
     # com o resto do subtítulo) - ver _desenhar_linha_rica.
     ascent_sub, _ = fonte_sub.getmetrics()
     for linha in linhas_sub:
         _desenhar_linha_rica(
-            draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, COR_TEXTO_MUTED, marca.cor_destaque
+            draw, linha, fonte_sub, fonte_sub_mark, y + ascent_sub, LARGURA, cor_texto_muted, marca.cor_destaque
         )
         y += altura_linha_sub
     y += 52
@@ -464,11 +519,11 @@ def render_slide2(headline2: str, sub2: str, out_path: str, marca: Marca = MARCA
     l2 = draw.textlength(texto_cta_2, font=fonte_cta)
     l3 = draw.textlength(texto_cta_3, font=fonte_cta)
     x = cta_x_centro - (l1 + l2 + l3) / 2
-    draw.text((x, y), texto_cta_1, font=fonte_cta, fill=COR_TEXTO)
+    draw.text((x, y), texto_cta_1, font=fonte_cta, fill=cor_texto)
     x += l1
     draw.text((x, y), texto_cta_2, font=fonte_cta, fill=marca.cor_destaque)
     x += l2
-    draw.text((x, y), texto_cta_3, font=fonte_cta, fill=COR_TEXTO)
+    draw.text((x, y), texto_cta_3, font=fonte_cta, fill=cor_texto)
     y += altura_cta + 48
 
     _desenhar_marca(img, draw, marca, int(y), LARGURA, escala=34 / 38)

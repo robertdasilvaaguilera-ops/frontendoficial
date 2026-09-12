@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import {
   CheckCircle2,
   Eye,
@@ -8,6 +8,7 @@ import {
   Loader2,
   Plus,
   Radio,
+  Sparkles,
   ShieldAlert,
   Trash2,
   UploadCloud,
@@ -23,9 +24,14 @@ import {
   imagemSocialUrl,
   subirLogo,
   removerLogo,
+  subirFundo,
+  removerFundo,
+  gerarIdentidadeIA,
   gerarPreview,
+  ESTILO_LABEL,
   type SocialConfig,
   type SocialPost,
+  type EstiloTipografico,
 } from "@/lib/social-api";
 import { useSessaoAtual } from "@/components/AuthGate";
 
@@ -97,6 +103,16 @@ function MidiaSocialAdmin() {
   const [gerandoPreview, setGerandoPreview] = useState(false);
   const [preview, setPreview] = useState<{ img1: string; img2: string } | null>(null);
 
+  const [estilo, setEstilo] = useState<EstiloTipografico>(config.estilo);
+  const [textoClaro, setTextoClaro] = useState(config.textoClaro);
+  const [fundo1Path, setFundo1Path] = useState(config.fundo1Path);
+  const [fundo2Path, setFundo2Path] = useState(config.fundo2Path);
+  const fundo1InputRef = useRef<HTMLInputElement>(null);
+  const fundo2InputRef = useRef<HTMLInputElement>(null);
+  const [enviandoFundo, setEnviandoFundo] = useState<1 | 2 | null>(null);
+  const [descricaoIA, setDescricaoIA] = useState("");
+  const [gerandoIA, setGerandoIA] = useState(false);
+
   const [salvando, setSalvando] = useState(false);
   const [testando, setTestando] = useState(false);
   const [publicando, setPublicando] = useState(false);
@@ -153,6 +169,8 @@ function MidiaSocialAdmin() {
         corFundoClaro,
         corFundoEscuro,
         corDestaque,
+        estilo,
+        textoClaro,
       });
       setIgToken("");
       setIgContaId(salvo.igBusinessAccountId);
@@ -161,6 +179,8 @@ function MidiaSocialAdmin() {
       setCorFundoClaro(salvo.corFundoClaro);
       setCorFundoEscuro(salvo.corFundoEscuro);
       setCorDestaque(salvo.corDestaque);
+      setEstilo(salvo.estilo);
+      setTextoClaro(salvo.textoClaro);
       await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
       setSucesso("Configuração salva.");
     } catch (err) {
@@ -205,7 +225,7 @@ function MidiaSocialAdmin() {
     setGerandoPreview(true);
     setErro(null);
     try {
-      const r = await gerarPreview({ marcaNome, marcaHandle, corFundoClaro, corFundoEscuro, corDestaque });
+      const r = await gerarPreview({ marcaNome, marcaHandle, corFundoClaro, corFundoEscuro, corDestaque, estilo, textoClaro });
       const cacheBuster = `?t=${Date.now()}`;
       setPreview({
         img1: `${imagemSocialUrl(r.imagem1Path)}${cacheBuster}`,
@@ -215,6 +235,58 @@ function MidiaSocialAdmin() {
       setErro(err instanceof Error ? err.message : "Não consegui gerar a prévia agora.");
     } finally {
       setGerandoPreview(false);
+    }
+  }
+
+  async function enviarFundo(slide: 1 | 2) {
+    const ref = slide === 1 ? fundo1InputRef : fundo2InputRef;
+    const arquivo = ref.current?.files?.[0];
+    if (!arquivo) return;
+    setEnviandoFundo(slide);
+    setErro(null);
+    try {
+      const caminho = await subirFundo(slide, arquivo);
+      if (slide === 1) setFundo1Path(caminho);
+      else setFundo2Path(caminho);
+      await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
+      if (ref.current) ref.current.value = "";
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui enviar o fundo agora.");
+    } finally {
+      setEnviandoFundo(null);
+    }
+  }
+
+  async function apagarFundo(slide: 1 | 2) {
+    setEnviandoFundo(slide);
+    setErro(null);
+    try {
+      await removerFundo(slide);
+      if (slide === 1) setFundo1Path("");
+      else setFundo2Path("");
+      await queryClient.invalidateQueries({ queryKey: ["social", "config"] });
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui remover o fundo agora.");
+    } finally {
+      setEnviandoFundo(null);
+    }
+  }
+
+  async function gerarComIA() {
+    if (!descricaoIA.trim()) return;
+    setGerandoIA(true);
+    setErro(null);
+    try {
+      const sugestao = await gerarIdentidadeIA(descricaoIA.trim());
+      setCorFundoClaro(sugestao.corFundoClaro);
+      setCorFundoEscuro(sugestao.corFundoEscuro);
+      setCorDestaque(sugestao.corDestaque);
+      setEstilo(sugestao.estilo);
+      setTextoClaro(sugestao.textoClaro);
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui gerar a identidade agora.");
+    } finally {
+      setGerandoIA(false);
     }
   }
 
@@ -337,9 +409,35 @@ function MidiaSocialAdmin() {
       <section className="mt-6 surface rounded-lg p-5">
         <h2 className="text-sm font-semibold">Identidade visual do post</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Nome, @handle, cores e logo que aparecem nas imagens geradas - personalize pra usar com
-          outro escritório ou marca além do perfil original da Atlas.
+          Nome, @handle, cores, fonte e fundo que aparecem nas imagens geradas - personalize pra
+          usar com outro escritório ou marca além do perfil original da Atlas.
         </p>
+
+        <div className="mt-4 rounded-lg border border-dashed border-primary/40 bg-primary/5 p-4">
+          <label className="text-[10px] font-mono uppercase tracking-widest text-primary inline-flex items-center gap-1.5">
+            <Sparkles className="h-3 w-3" /> Não sabe por onde começar? Descreva e a IA sugere
+          </label>
+          <div className="mt-2 flex flex-col sm:flex-row gap-2">
+            <input
+              value={descricaoIA}
+              onChange={(e) => setDescricaoIA(e.target.value)}
+              placeholder='Ex: "algo elegante, tons de vinho e dourado" ou "moderno, azul e branco, minimalista"'
+              className="w-full rounded-md bg-background border border-border px-3 py-2 text-sm outline-none focus:border-primary"
+            />
+            <button
+              onClick={gerarComIA}
+              disabled={gerandoIA || !descricaoIA.trim()}
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 shrink-0"
+            >
+              {gerandoIA ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Gerar com IA
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Preenche cores e fonte abaixo (você ainda revisa, gera prévia e só depois salva - não
+            aplica nada sozinho).
+          </p>
+        </div>
 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
@@ -422,6 +520,66 @@ function MidiaSocialAdmin() {
             </div>
           </div>
         </div>
+
+        <div className="mt-4">
+          <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+            Estilo tipográfico
+          </label>
+          <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {(Object.keys(ESTILO_LABEL) as EstiloTipografico[]).map((opcao) => (
+              <button
+                key={opcao}
+                onClick={() => setEstilo(opcao)}
+                className={`rounded-md border px-3 py-2 text-xs font-medium text-left transition-colors ${
+                  estilo === opcao
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border hover:bg-accent/40"
+                }`}
+              >
+                {ESTILO_LABEL[opcao]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="mt-4 inline-flex items-center gap-2.5">
+          <button
+            role="switch"
+            aria-checked={!textoClaro}
+            onClick={() => setTextoClaro((v) => !v)}
+            className={`relative h-5 w-9 rounded-full transition-colors ${!textoClaro ? "bg-primary" : "bg-border"}`}
+          >
+            <span
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                !textoClaro ? "translate-x-4" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+          <span className="text-xs font-medium">Texto escuro (use com fundo claro)</span>
+        </label>
+
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <FundoUploadField
+            titulo="Fundo próprio - imagem 1"
+            fundoPath={fundo1Path}
+            inputRef={fundo1InputRef}
+            enviando={enviandoFundo === 1}
+            onEnviar={() => enviarFundo(1)}
+            onRemover={() => apagarFundo(1)}
+          />
+          <FundoUploadField
+            titulo="Fundo próprio - imagem 2"
+            fundoPath={fundo2Path}
+            inputRef={fundo2InputRef}
+            enviando={enviandoFundo === 2}
+            onEnviar={() => enviarFundo(2)}
+            onRemover={() => apagarFundo(2)}
+          />
+        </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          Já tem uma arte pronta pro post? Suba aqui - o texto gerado é escrito por cima dela, no
+          lugar do degradê. Sem upload, usa as cores de fundo configuradas acima.
+        </p>
 
         <div className="mt-4">
           <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
@@ -644,6 +802,62 @@ const STATUS_CLASSE: Record<SocialPost["status"], string> = {
   sem_decisao: "bg-muted text-muted-foreground",
   inativo: "bg-muted text-muted-foreground",
 };
+
+function FundoUploadField({
+  titulo,
+  fundoPath,
+  inputRef,
+  enviando,
+  onEnviar,
+  onRemover,
+}: {
+  titulo: string;
+  fundoPath: string;
+  inputRef: RefObject<HTMLInputElement | null>;
+  enviando: boolean;
+  onEnviar: () => void;
+  onRemover: () => void;
+}) {
+  return (
+    <div>
+      <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+        {titulo}
+      </label>
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        {fundoPath && (
+          <img
+            src={`${imagemSocialUrl(fundoPath)}?v=${fundoPath}`}
+            alt="Fundo atual"
+            className="h-10 w-8 object-cover rounded border border-border"
+          />
+        )}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          disabled={enviando}
+          className="text-xs text-muted-foreground file:mr-2 file:rounded-md file:border-0 file:bg-accent file:px-2.5 file:py-1.5 file:text-xs file:font-medium max-w-[220px]"
+        />
+        <button
+          onClick={onEnviar}
+          disabled={enviando}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent/40 disabled:opacity-50"
+        >
+          {enviando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+        </button>
+        {fundoPath && (
+          <button
+            onClick={onRemover}
+            disabled={enviando}
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-risk hover:bg-risk/10 disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function PostHistoricoItem({ post }: { post: SocialPost }) {
   const img1 = imagemSocialUrl(post.imagem1Path);

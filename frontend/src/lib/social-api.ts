@@ -28,7 +28,19 @@ export interface SocialConfig {
   corFundoEscuro: string; // hex #RRGGBB
   corDestaque: string; // hex #RRGGBB - cor do grifo/detalhes
   logoPath: string; // nome do arquivo em /social/imagem/{logoPath}, ou "" sem logo
+  estilo: EstiloTipografico;
+  textoClaro: boolean; // false = texto escuro (fundo customizado claro)
+  fundo1Path: string; // fundo próprio do slide 1 (arte pronta), ou "" = degradê
+  fundo2Path: string; // idem, slide 2
 }
+
+export type EstiloTipografico = "classico" | "editorial" | "moderno";
+
+export const ESTILO_LABEL: Record<EstiloTipografico, string> = {
+  classico: "Clássico (serifado elegante)",
+  editorial: "Editorial (serifado dramático)",
+  moderno: "Moderno (só sans-serif)",
+};
 
 export interface SocialConfigInput {
   ativo?: boolean;
@@ -43,6 +55,8 @@ export interface SocialConfigInput {
   corFundoClaro?: string;
   corFundoEscuro?: string;
   corDestaque?: string;
+  estilo?: EstiloTipografico;
+  textoClaro?: boolean;
 }
 
 export async function getSocialConfig(): Promise<SocialConfig> {
@@ -152,12 +166,55 @@ export async function removerLogo(): Promise<void> {
   if (!r.ok) throw new Error(`Falha ao remover logo (HTTP ${r.status})`);
 }
 
+export async function subirFundo(slide: 1 | 2, arquivo: File): Promise<string> {
+  if (!API_URL) precisaDeApi();
+  const form = new FormData();
+  form.append("arquivo", arquivo);
+  const r = await fetch(`${API_URL}/social/fundo?slide=${slide}`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.detail || `Falha ao enviar fundo (HTTP ${r.status})`);
+  return body[`fundo${slide}Path`] as string;
+}
+
+export async function removerFundo(slide: 1 | 2): Promise<void> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/social/fundo?slide=${slide}`, { method: "DELETE", credentials: "include" });
+  if (!r.ok) throw new Error(`Falha ao remover fundo (HTTP ${r.status})`);
+}
+
+export interface IdentidadeSugerida {
+  corFundoClaro: string;
+  corFundoEscuro: string;
+  corDestaque: string;
+  estilo: EstiloTipografico;
+  textoClaro: boolean;
+}
+
+export async function gerarIdentidadeIA(descricao: string): Promise<IdentidadeSugerida> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/social/gerar-identidade`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ descricao }),
+    credentials: "include",
+  });
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.detail || `Falha ao gerar identidade (HTTP ${r.status})`);
+  return body as IdentidadeSugerida;
+}
+
 export interface SocialPreviewInput {
   marcaNome?: string;
   marcaHandle?: string;
   corFundoClaro?: string;
   corFundoEscuro?: string;
   corDestaque?: string;
+  estilo?: EstiloTipografico;
+  textoClaro?: boolean;
 }
 
 export interface SocialPreviewResultado {

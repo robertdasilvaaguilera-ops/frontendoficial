@@ -96,6 +96,67 @@ Regras de conteúdo:
 """
 
 
+SYSTEM_PROMPT_IDENTIDADE = """Você é um designer de marca especializado em posts de Instagram \
+para escritórios de advocacia/contabilidade tributária. Um usuário vai descrever, em texto \
+livre, a identidade visual que imagina pro post automático de decisões tributárias do perfil \
+dele - você traduz essa descrição numa configuração estruturada, sempre com resultado \
+profissional e legível, mesmo que a descrição seja vaga ou incompleta.
+
+Responda SOMENTE com um JSON válido, sem texto antes ou depois:
+{
+  "corFundoClaro": "#RRGGBB",
+  "corFundoEscuro": "#RRGGBB",
+  "corDestaque": "#RRGGBB",
+  "estilo": "classico" | "editorial" | "moderno",
+  "textoClaro": true | false
+}
+
+Regras obrigatórias:
+1. "corFundoClaro" e "corFundoEscuro" formam um degradê (claro -> escuro, mesmo tom). Se o
+   usuário pedir um visual escuro/sóbrio/elegante (o mais comum e mais seguro pra este tipo de
+   conteúdo), use dois tons escuros e próximos (ex: dois tons de azul-marinho, verde-escuro,
+   grafite, vinho escuro) - textoClaro=true nesse caso. Só use fundo CLARO (branco/creme/tons
+   pastéis) se o usuário pedir isso explicitamente (ex: "fundo branco", "visual clean e claro")
+   - nesse caso textoClaro=false, senão o texto fica ilegível.
+2. "corDestaque": SEMPRE uma cor clara/vibrante (nunca escura, nunca preta/cinza-escuro) - é o
+   fundo do grifo, e o texto sobre ela é sempre desenhado escuro. Se o usuário mencionar uma
+   cor da marca dele, use essa cor (ajustando a claridade se preciso pra continuar legível).
+   Sem menção de cor, use dourado/âmbar (o padrão do produto) ou escolha algo que combine com
+   o fundo escolhido.
+3. "estilo": escolha com base no tom da descrição -
+   "classico" = sério, tradicional, elegante discreto (serifado clássico) - padrão se a
+   descrição não indicar nada;
+   "editorial" = sofisticado, editorial, dramático, "de revista" (serifado mais expressivo);
+   "moderno" = clean, tech, jovem, minimalista, corporativo moderno (só sans-serif).
+4. Nunca devolva cores muito próximas de preto puro (#000000) ou branco puro (#FFFFFF) - use
+   tons com um pouco de matiz (fica mais premium e menos genérico).
+5. Se a descrição não der nenhuma pista de cor, mantenha a paleta padrão do produto (fundo
+   azul-marinho escuro degradê, destaque dourado, estilo clássico, textoClaro=true).
+"""
+
+
+def gerar_identidade_visual(descricao: str) -> dict:
+    """Traduz uma descrição em texto livre (ex: "quero algo elegante, vinho
+    e dourado") na configuração estruturada de identidade visual (cores +
+    estilo tipográfico curado) - usado pelo botão "Gerar com IA" na aba
+    Mídia Social. Nunca publica nem salva nada sozinho - só sugere valores
+    pro formulário, que o usuário ainda revisa/ajusta antes de salvar."""
+    bruto = chamar(
+        SYSTEM_PROMPT_IDENTIDADE,
+        [{"role": "user", "content": descricao.strip()}],
+        max_tokens=300,
+    )
+    dados = _extrair_json(bruto)
+    estilo = dados.get("estilo") if dados.get("estilo") in ("classico", "editorial", "moderno") else "classico"
+    return {
+        "corFundoClaro": str(dados.get("corFundoClaro", "#171B24")),
+        "corFundoEscuro": str(dados.get("corFundoEscuro", "#0B0D12")),
+        "corDestaque": str(dados.get("corDestaque", "#D9A544")),
+        "estilo": estilo,
+        "textoClaro": bool(dados.get("textoClaro", True)),
+    }
+
+
 def _formatar_decisoes(decisoes: list[dict]) -> str:
     blocos = []
     for d in decisoes:

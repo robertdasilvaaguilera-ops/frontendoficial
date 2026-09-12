@@ -121,6 +121,10 @@ def iniciar():
             cor_fundo_escuro TEXT NOT NULL DEFAULT '#0B0D12',
             cor_destaque TEXT NOT NULL DEFAULT '#D9A544',
             logo_path TEXT NOT NULL DEFAULT '',
+            estilo TEXT NOT NULL DEFAULT 'classico',
+            texto_claro INTEGER NOT NULL DEFAULT 1,
+            fundo1_path TEXT NOT NULL DEFAULT '',
+            fundo2_path TEXT NOT NULL DEFAULT '',
             atualizado_em TEXT
         )
     """)
@@ -199,22 +203,28 @@ def _migrar_credenciais_legado(conn: sqlite3.Connection) -> None:
 
 
 def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
-    """Bancos criados antes da identidade de marca (nome/handle/cores/logo)
-    ficarem configuráveis não têm essas colunas - adiciona com os mesmos
-    defaults do CREATE TABLE acima (a identidade original da Atlas), pra
-    quem já tinha configuração salva continuar publicando exatamente igual."""
+    """Bancos criados antes da identidade de marca (nome/handle/cores/logo/
+    fonte/fundo) ficarem configuráveis não têm essas colunas - adiciona com
+    os mesmos defaults do CREATE TABLE acima (a identidade original da
+    Atlas), pra quem já tinha configuração salva continuar publicando
+    exatamente igual."""
     colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_config)")}
-    novas = {
+    novas_texto = {
         "marca_nome": "'ATLAS'",
         "marca_handle": "'@atlas.tributos'",
         "cor_fundo_claro": "'#171B24'",
         "cor_fundo_escuro": "'#0B0D12'",
         "cor_destaque": "'#D9A544'",
         "logo_path": "''",
+        "estilo": "'classico'",
+        "fundo1_path": "''",
+        "fundo2_path": "''",
     }
-    for coluna, default in novas.items():
+    for coluna, default in novas_texto.items():
         if coluna not in colunas:
             conn.execute(f"ALTER TABLE social_config ADD COLUMN {coluna} TEXT NOT NULL DEFAULT {default}")
+    if "texto_claro" not in colunas:
+        conn.execute("ALTER TABLE social_config ADD COLUMN texto_claro INTEGER NOT NULL DEFAULT 1")
     conn.commit()
 
 
@@ -566,6 +576,10 @@ _SOCIAL_CONFIG_PADRAO = {
     "corFundoEscuro": "#0B0D12",
     "corDestaque": "#D9A544",
     "logoPath": "",
+    "estilo": "classico",
+    "textoClaro": True,
+    "fundo1Path": "",
+    "fundo2Path": "",
 }
 
 
@@ -589,6 +603,10 @@ def obter_social_config() -> dict:
         "corFundoEscuro": linha["cor_fundo_escuro"] or "#0B0D12",
         "corDestaque": linha["cor_destaque"] or "#D9A544",
         "logoPath": linha["logo_path"] or "",
+        "estilo": linha["estilo"] or "classico",
+        "textoClaro": bool(linha["texto_claro"]),
+        "fundo1Path": linha["fundo1_path"] or "",
+        "fundo2Path": linha["fundo2_path"] or "",
     }
 
 
@@ -604,8 +622,9 @@ def salvar_social_config(dados: dict) -> dict:
         """
         INSERT INTO social_config
             (id, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
-             marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path, atualizado_em)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path,
+             estilo, texto_claro, fundo1_path, fundo2_path, atualizado_em)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
             tom = excluded.tom, horarios = excluded.horarios,
@@ -614,6 +633,8 @@ def salvar_social_config(dados: dict) -> dict:
             marca_nome = excluded.marca_nome, marca_handle = excluded.marca_handle,
             cor_fundo_claro = excluded.cor_fundo_claro, cor_fundo_escuro = excluded.cor_fundo_escuro,
             cor_destaque = excluded.cor_destaque, logo_path = excluded.logo_path,
+            estilo = excluded.estilo, texto_claro = excluded.texto_claro,
+            fundo1_path = excluded.fundo1_path, fundo2_path = excluded.fundo2_path,
             atualizado_em = excluded.atualizado_em
         """,
         (
@@ -630,6 +651,10 @@ def salvar_social_config(dados: dict) -> dict:
             mesclado["corFundoEscuro"],
             mesclado["corDestaque"],
             mesclado["logoPath"],
+            mesclado["estilo"],
+            int(bool(mesclado["textoClaro"])),
+            mesclado["fundo1Path"],
+            mesclado["fundo2Path"],
             agora,
         ),
     )
