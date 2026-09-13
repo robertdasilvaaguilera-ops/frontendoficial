@@ -136,8 +136,9 @@ export const usersQuery = queryOptions({
 
 // Força uma rodada de coleta (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN) na hora,
 // em vez de esperar o próximo horário agendado (10:30/14:30/22:30 UTC) - ver
-// /admin/coletar-decisoes-agora em api_server.py. Só admin; pode demorar
-// alguns minutos (a coleta varre várias fontes externas antes de responder).
+// /admin/coletar-decisoes-agora em api_server.py. Só admin. A resposta volta
+// na hora (a coleta em si roda em background no servidor) - ela pode levar
+// vários minutos pra terminar de verdade.
 export async function coletarDecisoesAgora(): Promise<void> {
   if (!API_URL) precisaDeApi();
   const r = await fetch(`${API_URL}/admin/coletar-decisoes-agora`, {

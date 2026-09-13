@@ -176,9 +176,12 @@ function ColetarDecisoesAgora() {
     setResultado(null);
     try {
       await coletarDecisoesAgora();
-      setResultado("Coleta concluída - confira a tela de Decisões/Oportunidades.");
+      setResultado(
+        "Coleta iniciada em segundo plano - pode levar vários minutos (STJ/DJEN com retentativas). " +
+          "Confira o resultado daqui a pouco na tela de Decisões/Oportunidades.",
+      );
     } catch (err) {
-      setErro(err instanceof Error ? err.message : "Não consegui coletar agora.");
+      setErro(err instanceof Error ? err.message : "Não consegui iniciar a coleta agora.");
     } finally {
       setColetando(false);
     }
@@ -191,7 +194,8 @@ function ColetarDecisoesAgora() {
       </div>
       <p className="mt-1.5 text-sm text-muted-foreground max-w-xl">
         Força uma rodada de coleta (CARF, STJ, PGFN, Receita, TRF4, DJEN...) na hora, em vez de
-        esperar o próximo horário agendado. Pode demorar alguns minutos.
+        esperar o próximo horário agendado. Roda em segundo plano no servidor - pode levar vários
+        minutos até aparecer algo novo nas Decisões/Oportunidades.
       </p>
       <div className="mt-4">
         <button
@@ -200,7 +204,7 @@ function ColetarDecisoesAgora() {
           className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           {coletando ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          {coletando ? "Coletando..." : "Coletar agora"}
+          {coletando ? "Iniciando..." : "Coletar agora"}
         </button>
       </div>
       {resultado && <p className="mt-3 text-sm text-emerald-600">{resultado}</p>}

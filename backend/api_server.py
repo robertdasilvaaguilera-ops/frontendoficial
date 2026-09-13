@@ -27,6 +27,7 @@ import os
 import re
 import hashlib
 import pickle
+import threading
 import unicodedata
 import uuid
 import pandas as pd
@@ -1274,18 +1275,35 @@ def gerar_parecer_endpoint(id: str, req: ParecerRequest, request: Request):
 # Roda sozinha 3x/dia (ver coleta_scheduler.py); este endpoint só existe pra
 # forçar uma rodada na hora (ex: logo após configurar o sistema, sem
 # precisar esperar o próximo horário agendado), igual ao "Publicar agora"
-# da Mídia Social. Só admin - pode demorar bastante (a coleta varre várias
-# fontes externas antes de responder).
+# da Mídia Social. Só admin.
+#
+# Roda em background (thread própria) em vez de bloquear a resposta: com o
+# proxy BR configurado, os coletores antes bloqueados (STJ, DJEN) passam a
+# tentar de verdade, com retentativas - a rodada inteira pode passar de
+# muitos minutos, tempo demais pra uma única requisição HTTP ficar presa
+# esperando (a borda na frente do Railway derruba a conexão antes disso,
+# e o navegador mostra "Failed to fetch" mesmo com a coleta seguindo bem).
+_coleta_manual_em_andamento = threading.Lock()
+
+
 @app.post("/admin/coletar-decisoes-agora")
 def admin_coletar_decisoes_agora(request: Request):
     _exigir_admin(request)
-    try:
-        atlas_engine.main()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha na coleta: {e}")
+    if not _coleta_manual_em_andamento.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Já tem uma coleta rodando agora - aguarde ela terminar.")
+
+    def _rodar():
+        try:
+            atlas_engine.main()
+        except Exception as e:
+            print(f"[ERRO] Coleta manual (coletar agora) falhou: {e}")
+        finally:
+            _coleta_manual_em_andamento.release()
+
+    threading.Thread(target=_rodar, daemon=True).start()
     # _carregar_dados() já detecta sozinha que o Excel mudou (mtime) e relê -
     # não precisa invalidar nada aqui manualmente.
-    return {"ok": True}
+    return {"ok": True, "iniciado": True}
 
 
 # Restauração pontual do Excel de decisões perdido nos redeploys anteriores
