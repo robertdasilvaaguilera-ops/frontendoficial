@@ -11,7 +11,7 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
-import { AppSidebar } from "@/components/AppSidebar";
+import { AppSidebar, MobileNav } from "@/components/AppSidebar";
 import { AuthGate } from "@/components/AuthGate";
 
 function NotFoundComponent() {
@@ -132,9 +132,12 @@ function RootComponent() {
       <AuthGate>
         <div className="flex min-h-screen w-full bg-background text-foreground">
           <AppSidebar />
-          <main className="flex-1 min-w-0">
-            <Outlet />
-          </main>
+          <div className="flex-1 min-w-0 flex flex-col">
+            <MobileNav />
+            <main className="flex-1 min-w-0">
+              <Outlet />
+            </main>
+          </div>
         </div>
       </AuthGate>
     </QueryClientProvider>
