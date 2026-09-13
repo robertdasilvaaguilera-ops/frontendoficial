@@ -1,8 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
-import { Plus, Trash2, UserRound, Loader2, ShieldAlert, UploadCloud } from "lucide-react";
-import { usersQuery, removerUsuario, restaurarDecisoesBackup, NIVEL_LABEL } from "@/lib/auth-api";
+import { Plus, Trash2, UserRound, Loader2, ShieldAlert, UploadCloud, RefreshCw } from "lucide-react";
+import {
+  usersQuery,
+  removerUsuario,
+  restaurarDecisoesBackup,
+  coletarDecisoesAgora,
+  NIVEL_LABEL,
+} from "@/lib/auth-api";
 import { useSessaoAtual } from "@/components/AuthGate";
 import { UserFormModal } from "@/components/UserFormModal";
 
@@ -150,7 +156,55 @@ function UsuariosAdmin({ usuarioLogado }: { usuarioLogado: string }) {
         </table>
       </div>
 
+      <ColetarDecisoesAgora />
       <RestaurarBackupDecisoes />
+    </div>
+  );
+}
+
+// Força uma rodada de coleta na hora, sem esperar o próximo horário agendado
+// (10:30/14:30/22:30 UTC) - útil pra conferir logo depois de mudar algo nos
+// coletores (ex: configurar um proxy) em vez de esperar horas.
+function ColetarDecisoesAgora() {
+  const [coletando, setColetando] = useState(false);
+  const [resultado, setResultado] = useState<string | null>(null);
+  const [erro, setErro] = useState<string | null>(null);
+
+  async function coletar() {
+    setColetando(true);
+    setErro(null);
+    setResultado(null);
+    try {
+      await coletarDecisoesAgora();
+      setResultado("Coleta concluída - confira a tela de Decisões/Oportunidades.");
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Não consegui coletar agora.");
+    } finally {
+      setColetando(false);
+    }
+  }
+
+  return (
+    <div className="mt-8 surface rounded-lg p-6">
+      <div className="text-[11px] font-mono uppercase tracking-widest text-muted-foreground">
+        Coletar decisões agora
+      </div>
+      <p className="mt-1.5 text-sm text-muted-foreground max-w-xl">
+        Força uma rodada de coleta (CARF, STJ, PGFN, Receita, TRF4, DJEN...) na hora, em vez de
+        esperar o próximo horário agendado. Pode demorar alguns minutos.
+      </p>
+      <div className="mt-4">
+        <button
+          onClick={coletar}
+          disabled={coletando}
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {coletando ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          {coletando ? "Coletando..." : "Coletar agora"}
+        </button>
+      </div>
+      {resultado && <p className="mt-3 text-sm text-emerald-600">{resultado}</p>}
+      {erro && <p className="mt-3 text-sm text-risk">{erro}</p>}
     </div>
   );
 }
