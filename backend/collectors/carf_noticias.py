@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 import requests
 from .base import CABECALHOS_NAVEGADOR
 
-ano_atual = datetime.now().year
-URL_NOTICIAS = f"https://www.gov.br/carf/pt-br/assuntos/noticias/{ano_atual}"
+# O gov.br migrou a listagem de notícias do CARF de /noticias/{ano} (que
+# passou a devolver 404) para /novas-noticias (sem ano na URL).
+URL_NOTICIAS = "https://www.gov.br/carf/pt-br/assuntos/novas-noticias"
 
 PADRAO_LINK = re.compile(
-    r'<a[^>]+href="(https://www\.gov\.br/carf/pt-br/assuntos/noticias/\d{4}/[^"]+)"[^>]*>(.*?)</a>',
+    r'<a[^>]+href="(https://www\.gov\.br/carf/pt-br/assuntos/novas-noticias/[^"]+)"[^>]*>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
 )
 
