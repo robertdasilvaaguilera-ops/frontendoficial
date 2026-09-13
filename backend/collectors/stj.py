@@ -14,6 +14,9 @@ URL_INFORMATIVO = "https://processo.stj.jus.br/jurisprudencia/externo/Informativ
 
 
 def coletar() -> list[dict]:
-    resultados = buscar_rss(URL_NOTICIAS, fonte="STJ - Notícias")
-    resultados += buscar_rss(URL_INFORMATIVO, fonte="STJ - Informativo de Jurisprudência")
+    # Ambas as URLs bloqueiam requisições de fora do Brasil (timeout na RSS,
+    # desafio anti-robô da Cloudflare no Informativo) - precisam do proxy
+    # configurado em PROXY_BR_URL (ver collectors/base.py).
+    resultados = buscar_rss(URL_NOTICIAS, fonte="STJ - Notícias", via_proxy_br=True)
+    resultados += buscar_rss(URL_INFORMATIVO, fonte="STJ - Informativo de Jurisprudência", via_proxy_br=True)
     return resultados

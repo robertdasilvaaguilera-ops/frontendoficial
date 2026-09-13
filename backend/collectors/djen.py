@@ -24,7 +24,7 @@ API publica (usada pelo proprio site comunica.pje.jus.br):
 import time
 import requests
 from datetime import datetime, timezone
-from .base import CABECALHOS_NAVEGADOR
+from .base import CABECALHOS_NAVEGADOR, PROXIES_BR, avisar_proxy_ausente_uma_vez
 
 URL_BASE = "https://comunicaapi.pje.jus.br/api/v1/comunicacao"
 PAUSA_ENTRE_CHAMADAS_SEGUNDOS = 0.5
@@ -60,6 +60,7 @@ def _buscar_por_termo(sigla: str, termo: str, data_hoje: str, diagnostico: bool 
             resposta = requests.get(
                 URL_BASE,
                 headers=CABECALHOS_NAVEGADOR,
+                proxies=PROXIES_BR,
                 params={
                     "siglaTribunal": sigla,
                     "dataDisponibilizacaoInicio": data_hoje,
@@ -123,6 +124,9 @@ def _buscar_por_termo(sigla: str, termo: str, data_hoje: str, diagnostico: bool 
 
 
 def coletar() -> list[dict]:
+    if not PROXIES_BR:
+        avisar_proxy_ausente_uma_vez("DJEN/PJe Comunica")
+
     todos_resultados = []
     data_hoje = datetime.now().strftime("%Y-%m-%d")
     tribunais_com_erro = []
