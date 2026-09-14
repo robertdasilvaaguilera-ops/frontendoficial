@@ -220,12 +220,18 @@ def escolher_e_escrever(
     partes.append("Escreva o JSON com a decisão escolhida e os textos do post.")
     conteudo = "\n\n".join(partes)
 
-    bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=1500)
+    # max_tokens alinhado com o equivalente manual (ai/social_post.py: 2048/3000)
+    # - essa tarefa é ainda mais pesada (também precisa ESCOLHER a decisão,
+    # além de escrever os 4 campos de texto), então um orçamento menor aqui
+    # deixava o texto sair vazio (o modelo de raciocínio gasta parte do
+    # orçamento "pensando" antes de escrever a resposta final) e o parse de
+    # JSON quebrava com "Expecting value: line 1 column 1" - bruto="".
+    bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=2048)
 
     try:
         dados = _extrair_json(bruto)
     except (ValueError, json.JSONDecodeError):
-        bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=2200)
+        bruto = chamar(system_prompt, [{"role": "user", "content": conteudo}], max_tokens=3200)
         dados = _extrair_json(bruto)  # deixa propagar se falhar de novo - chamador decide
 
     decisao_id = dados.get("decisao_id")
