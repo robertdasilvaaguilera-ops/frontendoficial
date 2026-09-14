@@ -7,9 +7,19 @@ configurar na aba Mídia Social (ver app_db.social_config).
 """
 from __future__ import annotations
 
+import time
+
 import requests
 
 GRAPH = "https://graph.facebook.com/v21.0"
+
+# Depois de criado, o container do Instagram fica "IN_PROGRESS" enquanto a
+# Meta baixa/processa as imagens - publicar antes disso terminar dá HTTP 400
+# "Media ID is not available" (code 9007, subcode 2207027). Espera até
+# "FINISHED" (ou desiste em erro/expirado/timeout) antes de publicar -
+# padrão recomendado pela própria documentação da Content Publishing API.
+_POLL_INTERVALO_SEGUNDOS = 3
+_POLL_TENTATIVAS_MAXIMAS = 20  # ~1 minuto no total
 
 
 class ErroGraphAPI(Exception):
@@ -42,6 +52,32 @@ def testar_conexao(token: str, conta_id: str) -> dict:
     return resp.json()
 
 
+def _aguardar_container_pronto(container_id: str, token: str) -> None:
+    for _ in range(_POLL_TENTATIVAS_MAXIMAS):
+        resp = requests.get(
+            f"{GRAPH}/{container_id}",
+            params={"fields": "status_code", "access_token": token},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            _erro(resp, "consultar_status_container")
+        status = resp.json().get("status_code")
+        if status == "FINISHED":
+            return
+        if status in ("ERROR", "EXPIRED"):
+            raise ErroGraphAPI(
+                "processar_container", 0,
+                f"A Meta reportou status '{status}' ao processar a mídia (container {container_id}).",
+            )
+        time.sleep(_POLL_INTERVALO_SEGUNDOS)
+
+    raise ErroGraphAPI(
+        "processar_container", 0,
+        f"A mídia (container {container_id}) não ficou pronta após "
+        f"{_POLL_TENTATIVAS_MAXIMAS * _POLL_INTERVALO_SEGUNDOS}s de espera - tente publicar de novo.",
+    )
+
+
 def publicar_carrossel(token: str, conta_id: str, imagem1_url: str, imagem2_url: str, legenda: str) -> dict:
     """Publica um carrossel de 2 imagens + legenda na conta profissional do
     Instagram (`conta_id`), em 3 chamadas (criar os 2 itens do carrossel,
@@ -72,6 +108,8 @@ def publicar_carrossel(token: str, conta_id: str, imagem1_url: str, imagem2_url:
     if resp.status_code != 200:
         _erro(resp, "criar_container_carrossel")
     container_id = resp.json()["id"]
+
+    _aguardar_container_pronto(container_id, token)
 
     resp = requests.post(
         f"{GRAPH}/{conta_id}/media_publish",
