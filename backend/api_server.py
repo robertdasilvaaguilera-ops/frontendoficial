@@ -21,26 +21,22 @@ dispositivo/aplicacaoPratica) e gerado sob demanda via POST
 /opportunities/{id}/parecer (Claude - ver ai/parecer.py), nao vem
 pre-computado no Excel.
 """
-import io
-import json
 import os
 import re
 import hashlib
 import pickle
-import threading
 import unicodedata
-import uuid
 import pandas as pd
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dotenv import load_dotenv
-from PIL import Image
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# Lê o arquivo .env (nesta mesma pasta) ANTES de importar ai.claude_chat,
+# Le o arquivo .env (nesta mesma pasta) ANTES de importar ai.claude_chat,
 # que le ANTHROPIC_API_KEY do ambiente assim que o modulo e importado.
 # override=True: o .env sempre vence, mesmo se ja existir uma variavel
 # ANTHROPIC_API_KEY antiga gravada no Windows (setx) ou no sistema -
@@ -54,19 +50,15 @@ from ai import (
     post_com_modelo,
     carrossel,
     imagem_contextual,
+    analise_conteudo,
 )
+from economics.indice_prospeccao import calcular_indice_prospeccao
 import app_db
 import auth
 import coleta_scheduler
-import main as atlas_engine
-from social import content as social_content
-from social import pipeline as social_pipeline
-from social import render as social_render
-from social import scheduler as social_scheduler
-from social.instagram import ErroGraphAPI, testar_conexao as testar_conexao_instagram
-
 import paths
 
+PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_EXCEL = paths.caminho("reports", "oportunidades.xlsx")
 # pd.read_excel (via openpyxl, parser XML puro-Python) leva vários segundos
 # nesse arquivo (milhares de linhas) - inaceitável pagar esse custo em toda
@@ -84,28 +76,28 @@ app_db.iniciar()
 # quem já está deslogado), e a raiz (só devolve a lista de endpoints, sem
 # dado nenhum do usuário).
 _ROTAS_PUBLICAS = {"/", "/auth/status", "/auth/setup", "/auth/registro", "/auth/login", "/auth/logout"}
-# Cookie de sessão entre origens diferentes (front e backend em subdomínios
-# distintos do Railway) só é enviado pelo navegador em fetch/XHR com
-# SameSite=None + Secure - "Lax" (o padrão de dev, front e back em
-# localhost) bloqueia isso silenciosamente (login "funciona" na chamada,
-# mas o cookie nunca volta na requisição seguinte). ATLAS_COOKIE_SECURE=true
-# liga esse modo em produção; local (http://) continua em Lax sem Secure,
-# já que Secure exige HTTPS.
-_COOKIE_SECURE = os.getenv("ATLAS_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes")
-_COOKIE_SAMESITE = "none" if _COOKIE_SECURE else "lax"
-# Prefixo servido sem login: as imagens do post automático de Instagram
-# precisam ser buscáveis publicamente pelos servidores da Meta (Graph API),
-# que não têm cookie de sessão nenhum - mesmo princípio de antes (ver
-# histórico do endpoint /automacao/imagem/{nome}), agora dentro do produto.
-_PREFIXOS_PUBLICOS = ("/social/imagem/",)
 NOME_COOKIE_SESSAO = "atlas_sessao"
+
+
+def _rota_publica(path: str) -> bool:
+    # /convites/{token}[/aceitar] tem que ser público - é a página que a
+    # pessoa convidada abre ANTES de ter qualquer login. O token em si (não
+    # adivinhável, ver auth.criar_convite) é o segredo, não a sessão.
+    return path in _ROTAS_PUBLICAS or path.startswith("/convites/")
+
+# ATLAS_COOKIE_SECURE=1 em produção (front e backend em domínios
+# diferentes - Vercel e Railway) - cookie cross-site só é enviado pelo
+# navegador com Secure+SameSite=None, então os dois têm que andar juntos.
+# Sem essa variável (uso local, mesmo domínio/porta variável), continua
+# Lax sem Secure, como sempre foi - HTTP puro em localhost não tem HTTPS
+# pra Secure funcionar.
+_COOKIE_SECURE = os.getenv("ATLAS_COOKIE_SECURE", "").lower() in ("1", "true")
+_COOKIE_SAMESITE = "none" if _COOKIE_SECURE else "lax"
 
 
 @app.middleware("http")
 async def exigir_login(request: Request, call_next):
-    if request.method == "OPTIONS" or request.url.path in _ROTAS_PUBLICAS:
-        return await call_next(request)
-    if any(request.url.path.startswith(p) for p in _PREFIXOS_PUBLICOS):
+    if request.method == "OPTIONS" or _rota_publica(request.url.path):
         return await call_next(request)
     token = request.cookies.get(NOME_COOKIE_SESSAO)
     if not auth.sessao_valida(token):
@@ -113,28 +105,27 @@ async def exigir_login(request: Request, call_next):
     return await call_next(request)
 
 
-# Origens de produção do frontend (ex: https://atlas-frontend-production-
-# b12b.up.railway.app) - lista separada por vírgula em ATLAS_CORS_ORIGINS,
-# configurada no Railway. Sem isso, só localhost funcionava (ver regex
-# abaixo) - o frontend implantado não conseguia nem fazer login.
-_ORIGENS_PRODUCAO = [o.strip() for o in os.getenv("ATLAS_CORS_ORIGINS", "").split(",") if o.strip()]
-
 # CORSMiddleware precisa ser adicionada DEPOIS de exigir_login (ordem
 # textual = ordem de "quem embrulha quem": o último add_middleware fica
 # por fora) - senão uma resposta 401 do exigir_login sai sem cabeçalho
 # CORS nenhum, e o navegador trata como falha de rede genérica em vez de
 # deixar o front ler o 401 de verdade (ex: pra mandar de volta pra tela de
 # login quando a sessão expira).
+# ATLAS_CORS_ORIGINS: origens extras liberadas além do localhost de sempre
+# (uma ou várias, separadas por vírgula) - em produção é a URL do front na
+# Vercel. Sem essa variável (uso local), CORS continua só liberando
+# localhost, comportamento idêntico ao de antes.
+_ORIGENS_EXTRAS = [o.strip() for o in os.getenv("ATLAS_CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     # allow_origins=["*"] não é permitido pelo navegador junto de
-    # allow_credentials=True (precisa do cookie de sessão do login) - origens
-    # de produção vêm de ATLAS_CORS_ORIGINS (lista exata); regex cobre
-    # qualquer porta em localhost/127.0.0.1, já que o front roda em dev numa
-    # porta que pode variar. CORSMiddleware libera se QUALQUER um dos dois
-    # bater com a origem da requisição.
-    allow_origins=_ORIGENS_PRODUCAO,
+    # allow_credentials=True (precisa do cookie de sessão do login) - regex
+    # cobre qualquer porta em localhost/127.0.0.1, já que o front roda em
+    # dev numa porta que pode variar. allow_origins soma as origens extras
+    # de produção por cima, sem tirar o acesso local.
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=_ORIGENS_EXTRAS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -144,6 +135,12 @@ app.add_middleware(
 class SetupRequest(BaseModel):
     usuario: str
     senha: str
+
+
+class RegistroRequest(BaseModel):
+    usuario: str
+    senha: str
+    aceitouTermos: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -157,10 +154,14 @@ class NovoUsuarioRequest(BaseModel):
     nivel: str
 
 
-class RegistroRequest(BaseModel):
+class NovoConviteRequest(BaseModel):
+    nivel: str
+    rotulo: str = ""
+
+
+class AceitarConviteRequest(BaseModel):
     usuario: str
     senha: str
-    aceitouTermos: bool = False
 
 
 def _validar_usuario_senha(usuario: str, senha: str) -> str:
@@ -182,16 +183,6 @@ def _exigir_admin(request: Request) -> str:
     info = _sessao_atual(request)
     if not info or info["nivel"] != "admin":
         raise HTTPException(status_code=403, detail="Só o administrador pode gerenciar usuários")
-    return info["usuario"]
-
-
-def _exigir_sessao(request: Request) -> str:
-    """Qualquer nível de usuário logado - usado pela Mídia Social, que é
-    uma ferramenta de toda a equipe, não só do dono (diferente de
-    /auth/users, que continua exclusivo do admin)."""
-    info = _sessao_atual(request)
-    if not info:
-        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
     return info["usuario"]
 
 
@@ -222,6 +213,20 @@ def _exigir_chat_permitido(request: Request) -> str:
     return info["usuario"]
 
 
+def _exigir_recursos_avancados(request: Request) -> str:
+    """Minha Carteira e Estúdio Visual - nível básico não tem acesso a
+    nenhum dos dois, só Radar e Notícias. O front já esconde os links e
+    bloqueia as telas pra básico, isso aqui é a garantia de verdade."""
+    info = _sessao_atual(request)
+    if not info:
+        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
+    if not auth.verificar_recursos_avancados(info["nivel"]):
+        raise HTTPException(
+            status_code=403, detail="Seu nível de acesso não inclui esse recurso."
+        )
+    return info["usuario"]
+
+
 @app.get("/auth/status")
 def auth_status(request: Request):
     info = _sessao_atual(request)
@@ -248,7 +253,10 @@ def auth_setup(req: SetupRequest):
     auth.criar_primeiro_usuario(usuario, req.senha)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
-    _definir_cookie_sessao(resposta, token)
+    resposta.set_cookie(
+        NOME_COOKIE_SESSAO, token, httponly=True, samesite=_COOKIE_SAMESITE,
+        secure=_COOKIE_SECURE, max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
+    )
     return resposta
 
 
@@ -276,26 +284,24 @@ def auth_registrar(req: RegistroRequest):
     auth.registrar_aceite_termos(usuario)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
-    _definir_cookie_sessao(resposta, token)
+    resposta.set_cookie(
+        NOME_COOKIE_SESSAO, token, httponly=True, samesite=_COOKIE_SAMESITE,
+        secure=_COOKIE_SECURE, max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
+    )
     return resposta
 
 
 @app.post("/auth/login")
 def auth_login(req: LoginRequest):
     usuario = req.usuario.strip()
-    minutos_bloqueado = auth.verificar_bloqueio_login(usuario)
-    if minutos_bloqueado is not None:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Muitas tentativas incorretas. Tente novamente em {minutos_bloqueado} min.",
-        )
     if not auth.verificar_login(usuario, req.senha):
-        auth.registrar_tentativa_login(usuario, sucesso=False)
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
-    auth.registrar_tentativa_login(usuario, sucesso=True)
     token = auth.criar_sessao(usuario)
     resposta = JSONResponse({"ok": True})
-    _definir_cookie_sessao(resposta, token)
+    resposta.set_cookie(
+        NOME_COOKIE_SESSAO, token, httponly=True, samesite=_COOKIE_SAMESITE,
+        secure=_COOKIE_SECURE, max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
+    )
     return resposta
 
 
@@ -305,14 +311,6 @@ def auth_logout(request: Request):
     resposta = JSONResponse({"ok": True})
     resposta.delete_cookie(NOME_COOKIE_SESSAO, samesite=_COOKIE_SAMESITE, secure=_COOKIE_SECURE)
     return resposta
-
-
-def _definir_cookie_sessao(resposta: JSONResponse, token: str) -> None:
-    resposta.set_cookie(
-        NOME_COOKIE_SESSAO, token, httponly=True,
-        samesite=_COOKIE_SAMESITE, secure=_COOKIE_SECURE,
-        max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
-    )
 
 
 @app.get("/auth/users")
@@ -343,11 +341,59 @@ def auth_remover_usuario(usuario: str, request: Request):
     if not any(u["usuario"] == usuario for u in auth.listar_usuarios()):
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
     auth.remover_usuario(usuario)
-    # Login removido pode ter automação de Mídia Social ativa - recarrega
-    # o agendador agora, não só na próxima alteração de config de alguém,
-    # senão o job continuaria rodando até o próximo redeploy.
-    social_scheduler.recarregar()
     return {"ok": True}
+
+
+@app.get("/auth/invites")
+def auth_listar_convites(request: Request):
+    _exigir_admin(request)
+    return auth.listar_convites()
+
+
+@app.post("/auth/invites")
+def auth_criar_convite(req: NovoConviteRequest, request: Request):
+    usuario_logado = _exigir_admin(request)
+    if req.nivel not in auth.NIVEIS_CRIAVEIS:
+        raise HTTPException(
+            status_code=400, detail=f"Nível inválido - use um de {auth.NIVEIS_CRIAVEIS}"
+        )
+    token = auth.criar_convite(req.nivel, req.rotulo, usuario_logado)
+    return {"token": token}
+
+
+@app.delete("/auth/invites/{token}")
+def auth_remover_convite(token: str, request: Request):
+    _exigir_admin(request)
+    auth.remover_convite(token)
+    return {"ok": True}
+
+
+@app.get("/convites/{token}")
+def convite_validar(token: str):
+    """Página pública de aceitar convite chama isso pra saber se o link
+    ainda vale e mostrar pra que nível a pessoa foi convidada - não exige
+    login nenhum, é o que a pessoa convidada abre antes de ter conta."""
+    info = auth.validar_convite(token)
+    if not info:
+        raise HTTPException(status_code=404, detail="Convite inválido, expirado ou já usado")
+    return info
+
+
+@app.post("/convites/{token}/aceitar")
+def convite_aceitar(token: str, req: AceitarConviteRequest):
+    usuario = _validar_usuario_senha(req.usuario, req.senha)
+    if any(u["usuario"] == usuario for u in auth.listar_usuarios()):
+        raise HTTPException(status_code=409, detail="Já existe um login com esse usuário")
+    nivel = auth.aceitar_convite(token, usuario, req.senha)
+    if not nivel:
+        raise HTTPException(status_code=404, detail="Convite inválido, expirado ou já usado")
+    sessao_token = auth.criar_sessao(usuario)
+    resposta = JSONResponse({"ok": True})
+    resposta.set_cookie(
+        NOME_COOKIE_SESSAO, sessao_token, httponly=True, samesite=_COOKIE_SAMESITE,
+        secure=_COOKIE_SECURE, max_age=60 * 60 * 24 * auth.DURACAO_SESSAO_DIAS,
+    )
+    return resposta
 
 
 def _classificar_conteudo(fonte: str) -> str:
@@ -443,43 +489,14 @@ def _aquecer_cache_no_boot():
     o usuário abre depois de iniciar o backend é que pagava os vários
     segundos de leitura do arquivo, parecendo o sistema inteiro travado."""
     _carregar_dados()
-    # Religa o agendador de posts automáticos de Instagram nos horários já
-    # salvos em social_config - ver social/scheduler.py. Passa esta função
-    # (não o módulo social) porque é ela quem sabe montar a lista de
-    # decisões candidatas a partir do DataFrame carregado acima.
-    social_scheduler.iniciar(lambda: _decisoes_candidatas_social(25))
-    # Coleta diária de decisões (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN),
-    # 3x/dia, dentro do próprio serviço - ver coleta_scheduler.py.
+
+
+@app.on_event("startup")
+def _iniciar_coleta_agendada():
+    """Coleta de decisões (todos os tribunais + CARF) 3x/dia, dentro do
+    próprio serviço - roda sozinha no Railway, sem depender de nenhum
+    computador ligado. Ver coleta_scheduler.py."""
     coleta_scheduler.iniciar()
-
-
-def _decisoes_candidatas_social(limit: int = 25) -> list[dict]:
-    """Mesma seleção/formato usado pela extinta automação externa
-    (`/automacao/decisoes-recentes`) - decisões mais recentes, mais novas
-    primeiro, no shape que `social/content.py` espera."""
-    df = _carregar_dados()
-    if df.empty:
-        return []
-    df_decisoes = df[df["tipo_conteudo"] == "decisao"]
-    if "data_publicacao" in df_decisoes.columns:
-        df_decisoes = df_decisoes.sort_values("data_publicacao", ascending=False)
-    df_pagina = df_decisoes.head(max(1, min(limit, 100)))
-    resultado = []
-    for _, row in df_pagina.iterrows():
-        opp = _linha_para_opportunity(row)
-        resultado.append({
-            "id": opp["id"],
-            "titulo": opp["titulo"],
-            "tribunal": opp["tribunal"],
-            "data_julgamento": opp["decisao"]["data"],
-            "setor_economico": ", ".join(opp["setores"]) if opp["setores"] else "",
-            "mecanismo": opp["mecanismo"],
-            "tributos": opp["tributos"],
-            "resumo": opp["decisao"]["ementa"] or opp["resumoExecutivo"],
-            "impacto_estimado": opp["impactoFinanceiro"],
-            "link_fonte": opp["decisao"]["urlOficial"],
-        })
-    return resultado
 
 
 def _gerar_id(row) -> str:
@@ -716,29 +733,28 @@ class ClientRequest(BaseModel):
 
 @app.get("/clients")
 def listar_clientes(request: Request):
-    usuario = _exigir_sessao(request)
-    return app_db.listar_clientes(usuario)
+    _exigir_recursos_avancados(request)
+    return app_db.listar_clientes()
 
 
 @app.post("/clients")
 def criar_cliente(req: ClientRequest, request: Request):
-    usuario = _exigir_sessao(request)
+    _exigir_recursos_avancados(request)
     if not req.nome.strip():
         raise HTTPException(status_code=400, detail="Nome do cliente é obrigatório")
-    return app_db.inserir_cliente(req.model_dump(), usuario)
+    return app_db.inserir_cliente(req.model_dump())
 
 
 @app.delete("/clients/{id}")
 def deletar_cliente(id: str, request: Request):
-    usuario = _exigir_sessao(request)
-    if not app_db.remover_cliente(id, usuario):
+    _exigir_recursos_avancados(request)
+    if not app_db.remover_cliente(id):
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
     return {"ok": True}
 
 
 @app.get("/summary")
-def obter_resumo(request: Request):
-    usuario = _exigir_sessao(request)
+def obter_resumo():
     df = _carregar_dados()
     if df.empty:
         return {
@@ -750,7 +766,7 @@ def obter_resumo(request: Request):
         lambda f: _classificar_fonte_noticia(f) != "Tribunal"
     )
     return {
-        "totalClientes": app_db.contar_clientes(usuario),
+        "totalClientes": app_db.contar_clientes(),
         "oportunidadesHoje": int((df_decisoes.get("risco", 0) < 50).sum()),
         "riscosHoje": int((df_decisoes.get("risco", 0) >= 50).sum()),
         "alteracoesLegislativas": int(legislativas.sum()),
@@ -900,7 +916,7 @@ class ChatRequest(BaseModel):
     conversaId: str | None = None
 
 
-def _exigir_acesso_chat(request: Request) -> str:
+def _exigir_acesso_chat(request: Request) -> None:
     """Checagem "só o nível, sem olhar orçamento" - usada nos endpoints de
     histórico (listar/ler/apagar conversa), que não custam nada de Claude
     então não fazem sentido cortar por orçamento diário, só por nível."""
@@ -908,19 +924,18 @@ def _exigir_acesso_chat(request: Request) -> str:
     nivel = info["nivel"] if info else "basico"
     if not auth.LIMITES_NIVEL.get(nivel, auth.LIMITES_NIVEL["basico"])["chat"]:
         raise HTTPException(status_code=403, detail="Seu nível de acesso não inclui o Copiloto ATLAS.")
-    return info["usuario"]
 
 
 @app.get("/copilot/conversas")
 def listar_conversas(request: Request):
-    usuario = _exigir_acesso_chat(request)
-    return app_db.listar_conversas(usuario)
+    _exigir_acesso_chat(request)
+    return app_db.listar_conversas()
 
 
 @app.get("/copilot/conversas/{id}")
 def obter_conversa(id: str, request: Request):
-    usuario = _exigir_acesso_chat(request)
-    conversa = app_db.obter_conversa(id, usuario)
+    _exigir_acesso_chat(request)
+    conversa = app_db.obter_conversa(id)
     if conversa is None:
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return conversa
@@ -928,8 +943,8 @@ def obter_conversa(id: str, request: Request):
 
 @app.delete("/copilot/conversas/{id}")
 def deletar_conversa(id: str, request: Request):
-    usuario = _exigir_acesso_chat(request)
-    if not app_db.remover_conversa(id, usuario):
+    _exigir_acesso_chat(request)
+    if not app_db.remover_conversa(id):
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return {"ok": True}
 
@@ -995,7 +1010,7 @@ def copiloto_chat(req: ChatRequest, request: Request):
         {"role": "assistant", "content": resposta, "fontes": fontes},
     ]
     titulo = req.pergunta.strip()[:80]
-    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas, usuario)
+    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas)
 
     return {
         "resposta": resposta,
@@ -1135,6 +1150,7 @@ def _gerar_post_com_modelo_impl(id: str, req: PostComModeloRequest):
 
 @app.post("/opportunities/{id}/post-com-modelo")
 def gerar_post_com_modelo_endpoint(id: str, req: PostComModeloRequest, request: Request):
+    _exigir_recursos_avancados(request)
     usuario = _exigir_cota_geracao(request)
     resultado = _gerar_post_com_modelo_impl(id, req)
     auth.registrar_geracao(usuario)
@@ -1143,6 +1159,7 @@ def gerar_post_com_modelo_endpoint(id: str, req: PostComModeloRequest, request: 
 
 @app.post("/news/{id}/post-com-modelo")
 def gerar_post_com_modelo_noticia_endpoint(id: str, req: PostComModeloRequest, request: Request):
+    _exigir_recursos_avancados(request)
     usuario = _exigir_cota_geracao(request)
     resultado = _gerar_post_com_modelo_impl(id, req)
     auth.registrar_geracao(usuario)
@@ -1156,6 +1173,7 @@ class CarrosselRequest(BaseModel):
     mensagem: str | None = None
     historico: list[dict] = []
     imagemId: int | None = None  # foto da Pexels escolhida numa galeria (opcional)
+    anguloProspeccao: str | None = None  # da análise de conteúdo B2B (ver /prospeccao)
 
 
 def _gerar_carrossel_impl(id: str, req: CarrosselRequest):
@@ -1184,6 +1202,7 @@ def _gerar_carrossel_impl(id: str, req: CarrosselRequest):
             mensagem=req.mensagem,
             historico=req.historico,
             imagem_id=req.imagemId,
+            angulo_prospeccao=req.anguloProspeccao,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -1232,6 +1251,180 @@ def imagens_sugeridas_noticia_endpoint(id: str):
     return _imagens_sugeridas_impl(id)
 
 
+# --- Prospecção B2B (índice de potencial de conteúdo + análise de público-alvo) --
+
+# Quantas candidatas (já ordenadas pelo índice determinístico, grátis)
+# chegam a pagar uma chamada de IA pra análise de público-alvo/ângulo -
+# limite pra não escalar custo com o volume de itens coletados no dia.
+TAMANHO_SHORTLIST_PROSPECCAO = 15
+
+
+def _row_para_decisao_analise(row) -> dict:
+    """Monta o dict "decisao" (mesmo shape usado por ai/carrossel.py e
+    ai/analise_conteudo.py) direto da linha bruta do pipeline - funciona
+    igual pra opportunities e news, já que main.py roda estimator.estimate()
+    e indice_atlas em toda linha coletada, independente do tipo_conteudo
+    (decisão/notícia) atribuído depois em _carregar_dados."""
+    tributos = [t.strip() for t in str(row.get("tributos", "")).split(",") if t.strip()]
+    setores = [s.strip() for s in str(row.get("setores", "")).split(",") if s.strip()]
+    setor_identificado = str(row.get("setor_identificado", "")).strip()
+    if setor_identificado and setor_identificado not in setores:
+        setores.append(setor_identificado)
+    risco = float(row.get("risco", 0) or 0)
+    economia = float(row.get("economia_estimada", 0) or 0)
+    return {
+        "titulo": str(row.get("titulo", "")),
+        "tribunal": _extrair_tribunal(row.get("fonte", "")),
+        "data": str(row.get("data_publicacao", "") or datetime.now().date().isoformat()),
+        "mecanismo": str(row.get("mecanismo_economico", "") or "não classificado"),
+        "tributos": tributos,
+        "setores": setores,
+        "justificativaSetor": str(row.get("justificativa", "")).strip(),
+        "tipo": "risco" if risco >= 50 else "oportunidade",
+        "impactoFinanceiro": _mapear_impacto(economia),
+        "ementa": _limpar_html(str(row.get("resumo", "")).strip())[:2000],
+        "empresasAfetadas": int(row.get("empresas_afetadas", 0) or 0),
+    }
+
+
+def _analise_com_cache(id_: str, tipo: str, row) -> dict | None:
+    """{"indice":..., "analise":...} - usa cache se essa decisão/notícia já
+    foi analisada antes (ver app_db.analise_conteudo), senão calcula o
+    índice (grátis) e chama a IA pra análise (só isso tem custo) e salva
+    pra nunca recalcular a mesma à toa. None se a chamada à IA falhar
+    (chave ausente, rede, JSON inválido 2x) - o chamador decide se pula
+    esse item ou propaga erro pro usuário."""
+    cache = app_db.obter_analise_conteudo(id_, tipo)
+    if cache:
+        return {"indice": cache["indice"], "analise": cache["analise"]}
+    indice = calcular_indice_prospeccao(row)
+    decisao = _row_para_decisao_analise(row)
+    try:
+        analise = analise_conteudo.analisar_potencial_conteudo(decisao)
+    except (RuntimeError, requests.RequestException):
+        return None
+    app_db.salvar_analise_conteudo(id_, tipo, indice, analise)
+    return {"indice": indice, "analise": analise}
+
+
+@app.get("/prospeccao/prioritarias")
+def prospeccao_prioritarias(request: Request, tipo: str = "opportunities", limit: int = 5):
+    """As decisões/notícias do dia com maior potencial de virar conteúdo de
+    prospecção B2B: primeiro ordena TODAS as candidatas pelo índice
+    determinístico (grátis, ver economics/indice_prospeccao.py), depois só
+    chama a IA pra qualificar as melhores (TAMANHO_SHORTLIST_PROSPECCAO),
+    nunca em toda a base coletada no dia - e só devolve as que a análise
+    marcou como "recomendado" (nem toda decisão relevante vira boa
+    prospecção, ver ai/analise_conteudo.py)."""
+    _exigir_recursos_avancados(request)
+    if tipo not in ("opportunities", "news"):
+        raise HTTPException(status_code=400, detail="tipo deve ser 'opportunities' ou 'news'")
+    limit = max(1, min(limit, TAMANHO_SHORTLIST_PROSPECCAO))
+
+    df = _carregar_dados()
+    if df.empty:
+        return []
+    tipo_conteudo = "decisao" if tipo == "opportunities" else "noticia"
+    df_filtrado = df[df["tipo_conteudo"] == tipo_conteudo]
+    if df_filtrado.empty:
+        return []
+
+    candidatos = [(row, calcular_indice_prospeccao(row)) for _, row in df_filtrado.iterrows()]
+    candidatos.sort(key=lambda c: c[1]["indiceProspeccao"], reverse=True)
+    shortlist = list(enumerate(candidatos[:TAMANHO_SHORTLIST_PROSPECCAO]))
+
+    def _processar(par):
+        posicao, (row, _indice_previo) = par
+        id_ = _gerar_id(row)
+        return posicao, id_, row, _analise_com_cache(id_, tipo, row)
+
+    # paralelismo alto de propósito: cada chamada de IA da shortlist é
+    # independente e só acontece pra itens sem cache (ver _analise_com_cache)
+    # - sem isso, a primeira abertura do dia (nada em cache ainda) demora
+    # minutos em vez de segundos.
+    processados = []
+    with ThreadPoolExecutor(max_workers=TAMANHO_SHORTLIST_PROSPECCAO) as executor:
+        futuros = [executor.submit(_processar, par) for par in shortlist]
+        for futuro in as_completed(futuros):
+            processados.append(futuro.result())
+    processados.sort(key=lambda p: p[0])
+
+    resultado = []
+    for _posicao, id_, row, dados in processados:
+        if not dados or not dados["analise"]["recomendado"]:
+            continue
+        resultado.append({
+            "id": id_,
+            "tipo": tipo,
+            "titulo": str(row.get("titulo", "")),
+            "tribunal": _extrair_tribunal(row.get("fonte", "")),
+            "data": str(row.get("data_publicacao", "") or ""),
+            "indice": dados["indice"],
+            "analise": dados["analise"],
+        })
+        if len(resultado) >= limit:
+            break
+    return resultado
+
+
+@app.get("/opportunities/{id}/analise-conteudo")
+def analise_conteudo_oportunidade(id: str, request: Request):
+    _exigir_recursos_avancados(request)
+    row = _buscar_linha_por_id(id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Oportunidade não encontrada")
+    dados = _analise_com_cache(id, "opportunities", row)
+    if not dados:
+        raise HTTPException(
+            status_code=502, detail="Não consegui gerar a análise agora - tente de novo."
+        )
+    return dados
+
+
+@app.get("/news/{id}/analise-conteudo")
+def analise_conteudo_noticia(id: str, request: Request):
+    _exigir_recursos_avancados(request)
+    row = _buscar_linha_por_id(id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Notícia não encontrada")
+    dados = _analise_com_cache(id, "news", row)
+    if not dados:
+        raise HTTPException(
+            status_code=502, detail="Não consegui gerar a análise agora - tente de novo."
+        )
+    return dados
+
+
+class ModeloVisualRequest(BaseModel):
+    nome: str
+    config: dict
+
+
+@app.get("/modelos-visuais")
+def listar_modelos_visuais_endpoint(request: Request):
+    """Sem gate de recursosAvancados de propósito - básico também usa o
+    InstagramWorkspace (via Radar) e se beneficia de salvar/aplicar estilo."""
+    _sessao_atual(request)
+    return app_db.listar_modelos_visuais()
+
+
+@app.post("/modelos-visuais")
+def criar_modelo_visual_endpoint(req: ModeloVisualRequest, request: Request):
+    info = _sessao_atual(request)
+    nome = req.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=400, detail="Dê um nome pro modelo")
+    return app_db.criar_modelo_visual(nome, req.config, info["usuario"])
+
+
+@app.delete("/modelos-visuais/{id}")
+def remover_modelo_visual_endpoint(id: str, request: Request):
+    _sessao_atual(request)
+    if not app_db.remover_modelo_visual(id):
+        raise HTTPException(status_code=404, detail="Modelo não encontrado")
+    return {"ok": True}
+
+
 class ParecerRequest(BaseModel):
     ajuste: str | None = None
     historico: list[dict] = []
@@ -1271,395 +1464,6 @@ def gerar_parecer_endpoint(id: str, req: ParecerRequest, request: Request):
     return resultado
 
 
-# --- Coleta de decisões (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN) --------------
-# Roda sozinha 3x/dia (ver coleta_scheduler.py); este endpoint só existe pra
-# forçar uma rodada na hora (ex: logo após configurar o sistema, sem
-# precisar esperar o próximo horário agendado), igual ao "Publicar agora"
-# da Mídia Social. Só admin.
-#
-# Roda em background (thread própria) em vez de bloquear a resposta: com o
-# proxy BR configurado, os coletores antes bloqueados (STJ, DJEN) passam a
-# tentar de verdade, com retentativas - a rodada inteira pode passar de
-# muitos minutos, tempo demais pra uma única requisição HTTP ficar presa
-# esperando (a borda na frente do Railway derruba a conexão antes disso,
-# e o navegador mostra "Failed to fetch" mesmo com a coleta seguindo bem).
-_coleta_manual_em_andamento = threading.Lock()
-
-
-@app.post("/admin/coletar-decisoes-agora")
-def admin_coletar_decisoes_agora(request: Request):
-    _exigir_admin(request)
-    if not _coleta_manual_em_andamento.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Já tem uma coleta rodando agora - aguarde ela terminar.")
-
-    def _rodar():
-        try:
-            atlas_engine.main()
-        except Exception as e:
-            print(f"[ERRO] Coleta manual (coletar agora) falhou: {e}")
-        finally:
-            _coleta_manual_em_andamento.release()
-
-    threading.Thread(target=_rodar, daemon=True).start()
-    # _carregar_dados() já detecta sozinha que o Excel mudou (mtime) e relê -
-    # não precisa invalidar nada aqui manualmente.
-    return {"ok": True, "iniciado": True}
-
-
-# Restauração pontual do Excel de decisões perdido nos redeploys anteriores
-# ao ATLAS_DATA_DIR entrar em vigor (dados recuperados de um backup local
-# pré-migração) - endpoint de uso único, remover depois de restaurar.
-@app.post("/admin/restaurar-decisoes-backup")
-async def admin_restaurar_decisoes_backup(
-    request: Request,
-    arquivo: UploadFile = File(...),
-):
-    _exigir_admin(request)
-
-    conteudo = await arquivo.read()
-    df = pd.read_excel(io.BytesIO(conteudo))
-    df.to_excel(paths.caminho("reports", "oportunidades.xlsx"), index=False)
-
-    vistos = set(df["link"].dropna().astype(str)) if "link" in df.columns else set()
-    with open(paths.caminho("logs", "vistos.json"), "w", encoding="utf-8") as f:
-        json.dump(list(vistos), f, ensure_ascii=False)
-
-    return {"ok": True, "linhas_restauradas": len(df), "links_marcados_vistos": len(vistos)}
-
-
-# --- Mídia Social (automação de posts de Instagram) -----------------------
-# Aba "Mídia Social": o usuário configura temas/objetivos/tom, horários e as
-# credenciais do Instagram; o backend gera e publica os posts sozinho, nos
-# horários configurados (ver social/scheduler.py) - substitui a automação
-# externa que rodava fora do produto. Restrito a admin (guarda o token de
-# acesso da conta do Instagram, equivalente em sensibilidade ao login).
-
-_HEX_COR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
-
-# Contraste mínimo (razão WCAG) pra evitar salvar uma identidade ilegível -
-# o texto marcado é sempre escuro (social_render.COR_TEXTO_SOBRE_DESTAQUE),
-# então a cor de destaque precisa ser clara/vibrante o bastante contra ele
-# e contra o fundo escuro (senão o grifo "desaparece").
-_CONTRASTE_MIN_DESTAQUE_TEXTO = 2.2
-_CONTRASTE_MIN_DESTAQUE_FUNDO = 1.4
-
-
-def _validar_contraste_destaque(cor_destaque_hex: str, cor_fundo_escuro_hex: str) -> None:
-    cor_destaque = social_render.hex_para_rgb(cor_destaque_hex, social_render.MARCA_PADRAO.cor_destaque)
-    cor_fundo = social_render.hex_para_rgb(cor_fundo_escuro_hex, social_render.MARCA_PADRAO.cor_fundo_escuro)
-    contraste_texto = social_render.razao_contraste(cor_destaque, social_render.COR_TEXTO_SOBRE_DESTAQUE)
-    contraste_fundo = social_render.razao_contraste(cor_destaque, cor_fundo)
-    if contraste_texto < _CONTRASTE_MIN_DESTAQUE_TEXTO:
-        raise HTTPException(
-            status_code=400,
-            detail="Cor de destaque muito escura - o texto grifado (sempre escuro) ficaria "
-                   "difícil de ler. Escolha uma cor mais clara ou vibrante.",
-        )
-    if contraste_fundo < _CONTRASTE_MIN_DESTAQUE_FUNDO:
-        raise HTTPException(
-            status_code=400,
-            detail="Cor de destaque muito parecida com o fundo escuro - o grifo ficaria quase "
-                   "invisível. Escolha uma cor com mais contraste.",
-        )
-
-
-class SocialConfigRequest(BaseModel):
-    ativo: bool | None = None
-    temas: list[str] | None = None
-    objetivos: str | None = None
-    tom: str | None = None
-    horarios: list[str] | None = None
-    igAccessToken: str | None = None
-    igBusinessAccountId: str | None = None
-    marcaNome: str | None = None
-    marcaHandle: str | None = None
-    corFundoClaro: str | None = None
-    corFundoEscuro: str | None = None
-    corDestaque: str | None = None
-    estilo: str | None = None
-    textoClaro: bool | None = None
-    posicaoVertical: str | None = None
-    alinhamento: str | None = None
-
-
-_HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-
-
-def _mascarar_token(token: str) -> str:
-    if not token:
-        return ""
-    if len(token) <= 8:
-        return "•" * len(token)
-    return f"{token[:4]}{'•' * (len(token) - 8)}{token[-4:]}"
-
-
-@app.get("/social/config")
-def social_obter_config(request: Request):
-    usuario = _exigir_sessao(request)
-    config = app_db.obter_social_config(usuario)
-    return {
-        **config,
-        "igAccessToken": _mascarar_token(config["igAccessToken"]),
-        "temToken": bool(config["igAccessToken"]),
-    }
-
-
-@app.put("/social/config")
-def social_salvar_config(req: SocialConfigRequest, request: Request):
-    usuario = _exigir_sessao(request)
-    if req.horarios is not None:
-        invalidos = [h for h in req.horarios if not _HORARIO_RE.match(h)]
-        if invalidos:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Horário inválido (use HH:MM): {', '.join(invalidos)}",
-            )
-    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
-        valor = getattr(req, campo)
-        if valor is not None and not _HEX_COR_RE.match(valor):
-            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
-    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
-        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
-    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
-        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
-    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
-        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
-    if req.corDestaque is not None or req.corFundoEscuro is not None:
-        atual = app_db.obter_social_config(usuario)
-        _validar_contraste_destaque(
-            req.corDestaque if req.corDestaque is not None else atual["corDestaque"],
-            req.corFundoEscuro if req.corFundoEscuro is not None else atual["corFundoEscuro"],
-        )
-    dados = req.model_dump(exclude_unset=True)
-    # campo vazio no form de token não deve apagar o token já salvo -
-    # só atualiza se o usuário realmente digitou um novo.
-    if "igAccessToken" in dados and not dados["igAccessToken"]:
-        dados.pop("igAccessToken")
-    config = app_db.salvar_social_config(usuario, dados)
-    social_scheduler.recarregar()
-    return {
-        **config,
-        "igAccessToken": _mascarar_token(config["igAccessToken"]),
-        "temToken": bool(config["igAccessToken"]),
-    }
-
-
-class TestarConexaoRequest(BaseModel):
-    igAccessToken: str | None = None
-    igBusinessAccountId: str | None = None
-
-
-@app.post("/social/test-connection")
-def social_testar_conexao(req: TestarConexaoRequest, request: Request):
-    """Valida token + ID da conta - usa os valores enviados no corpo (tela
-    de configuração, antes de salvar) ou, se omitidos, os já salvos."""
-    usuario = _exigir_sessao(request)
-    config = app_db.obter_social_config(usuario)
-    token = req.igAccessToken or config["igAccessToken"]
-    conta_id = req.igBusinessAccountId or config["igBusinessAccountId"]
-    if not token or not conta_id:
-        raise HTTPException(status_code=400, detail="Informe o token e o ID da conta do Instagram")
-    try:
-        info = testar_conexao_instagram(token, conta_id)
-    except ErroGraphAPI as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"A Meta recusou a credencial (HTTP {e.status_code}): {e.resposta}",
-        )
-    return {"ok": True, "username": info.get("username"), "nome": info.get("name")}
-
-
-_EXTENSOES_IMAGEM = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
-_TAMANHO_MAX_IMAGEM = 5 * 1024 * 1024
-
-
-async def _salvar_imagem_upload(
-    arquivo: UploadFile, prefixo: str, resolucao_minima: tuple[int, int] | None = None
-) -> str:
-    """Valida tipo/tamanho/resolução e grava no volume persistente
-    (PASTA_IMAGENS, servido publicamente por /social/imagem/{nome}) - usado
-    tanto pelo logo quanto pelos fundos customizados. Devolve o nome do
-    arquivo salvo.
-
-    resolucao_minima: (largura, altura) mínima aceita - protege contra uma
-    imagem pequena demais ficar borrada quando esticada pro post (o fundo
-    cobre 1080x1350 inteiro; o logo é menos sensível, por isso só o fundo
-    passa esse parâmetro)."""
-    extensao = _EXTENSOES_IMAGEM.get(arquivo.content_type)
-    if not extensao:
-        raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
-    conteudo = await arquivo.read()
-    if len(conteudo) > _TAMANHO_MAX_IMAGEM:
-        raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 5MB)")
-    # O content-type acima vem do navegador (o cliente escolhe o valor, não
-    # é confiável sozinho) - decodificar de verdade confirma que os bytes
-    # são mesmo uma imagem válida antes de gravar no volume e servir
-    # publicamente em /social/imagem/{nome}.
-    try:
-        with Image.open(io.BytesIO(conteudo)) as img:
-            img.verify()
-        with Image.open(io.BytesIO(conteudo)) as img:
-            largura, altura = img.size
-    except Exception:
-        raise HTTPException(status_code=400, detail="Não consegui ler essa imagem - arquivo corrompido?")
-    if resolucao_minima:
-        min_largura, min_altura = resolucao_minima
-        if largura < min_largura or altura < min_altura:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Imagem muito pequena ({largura}x{altura}px) - envie pelo menos "
-                       f"{min_largura}x{min_altura}px pra não ficar borrada no post.",
-            )
-    nome_arquivo = f"{prefixo}_{uuid.uuid4().hex}{extensao}"
-    with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
-        f.write(conteudo)
-    return nome_arquivo
-
-
-@app.post("/social/logo")
-async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
-    """Logo do escritório/perfil pro rodapé de marca dos posts (ver
-    social/render.py) - guardado no mesmo volume persistente das imagens
-    geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
-    que já existe (a Graph API também precisa alcançar essas URLs)."""
-    usuario = _exigir_sessao(request)
-    nome_arquivo = await _salvar_imagem_upload(arquivo, "logo")
-    config = app_db.salvar_social_config(usuario, {"logoPath": nome_arquivo})
-    return {"logoPath": config["logoPath"]}
-
-
-@app.delete("/social/logo")
-def social_remover_logo(request: Request):
-    usuario = _exigir_sessao(request)
-    config = app_db.salvar_social_config(usuario, {"logoPath": ""})
-    return {"logoPath": config["logoPath"]}
-
-
-@app.post("/social/fundo")
-async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile = File(...)):
-    """Fundo próprio do escritório (arte já pronta) pro slide 1 ou 2 - o
-    sistema escreve o texto gerado por cima, na mesma área/fonte/cor já
-    configuradas (ver render._fundo_slide). Substitui o degradê da
-    identidade de marca só pra esse slide."""
-    usuario = _exigir_sessao(request)
-    if slide not in (1, 2):
-        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
-    # o fundo cobre a imagem 1080x1350 inteira (ver render._fundo_slide) -
-    # abaixo de ~2/3 disso ele fica visivelmente esticado/borrado.
-    nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}", resolucao_minima=(720, 900))
-    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": nome_arquivo})
-    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
-
-
-@app.delete("/social/fundo")
-def social_remover_fundo(request: Request, slide: int):
-    usuario = _exigir_sessao(request)
-    if slide not in (1, 2):
-        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
-    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": ""})
-    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
-
-
-class SocialIdentidadeIARequest(BaseModel):
-    descricao: str
-
-
-@app.post("/social/gerar-identidade")
-def social_gerar_identidade(req: SocialIdentidadeIARequest, request: Request):
-    """Traduz uma descrição em texto livre (ex: "quero algo elegante, vinho
-    e dourado") em cores + estilo tipográfico sugeridos - preenche o
-    formulário, mas não salva nem publica nada sozinho (o usuário revisa,
-    gera prévia e só então clica em Salvar)."""
-    _exigir_sessao(request)
-    descricao = req.descricao.strip()
-    if not descricao:
-        raise HTTPException(status_code=400, detail="Descreva a identidade visual que você imagina")
-    try:
-        return social_content.gerar_identidade_visual(descricao)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Falha ao gerar identidade com IA: {e}")
-
-
-class SocialPreviewRequest(BaseModel):
-    marcaNome: str | None = None
-    marcaHandle: str | None = None
-    corFundoClaro: str | None = None
-    corFundoEscuro: str | None = None
-    corDestaque: str | None = None
-    estilo: str | None = None
-    textoClaro: bool | None = None
-    posicaoVertical: str | None = None
-    alinhamento: str | None = None
-
-
-_PARAGRAFO_PREVIEW = (
-    "STF decide que o benefício fiscal vale mesmo sem homologação expressa da Receita, "
-    "§§independentemente de ato declaratório posterior§§."
-)
-_SUB2_PREVIEW = "Análise §§gerada automaticamente pela {marca}§§ a partir da decisão real de hoje."
-
-
-@app.post("/social/preview")
-def social_preview(req: SocialPreviewRequest, request: Request):
-    """Gera as duas imagens de exemplo com a identidade visual atual (salva
-    + overrides não salvos ainda, pra pré-visualizar cor/logo antes de
-    clicar em Salvar) - usa um texto fixo de exemplo, nunca uma decisão
-    real, então pode ser chamado quantas vezes quiser sem gastar Claude."""
-    usuario = _exigir_sessao(request)
-    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
-        valor = getattr(req, campo)
-        if valor is not None and not _HEX_COR_RE.match(valor):
-            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
-    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
-        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
-    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
-        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
-    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
-        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
-    config = {**app_db.obter_social_config(usuario), **req.model_dump(exclude_unset=True)}
-    marca = social_pipeline.marca_da_config(config)
-    nome1, nome2 = "preview_1.png", "preview_2.png"
-    social_render.render_slide1(
-        _PARAGRAFO_PREVIEW, os.path.join(social_pipeline.PASTA_IMAGENS, nome1), marca=marca
-    )
-    social_render.render_slide2(
-        "Inteligência tributária, todos os dias.",
-        _SUB2_PREVIEW.format(marca=marca.nome),
-        os.path.join(social_pipeline.PASTA_IMAGENS, nome2),
-        marca=marca,
-    )
-    return {"imagem1Path": nome1, "imagem2Path": nome2}
-
-
-@app.get("/social/posts")
-def social_listar_posts(request: Request, limit: int = 30):
-    usuario = _exigir_sessao(request)
-    return app_db.listar_social_posts(usuario, limit)
-
-
-@app.post("/social/run-now")
-def social_publicar_agora(request: Request):
-    """Botão "Publicar agora" - roda o ciclo completo na hora (ignora o
-    toggle "ativo" e o agendamento), pra testar a configuração de ponta a
-    ponta sem esperar o próximo horário. Publica de verdade se as
-    credenciais estiverem corretas - não é um modo de simulação."""
-    usuario = _exigir_cota_geracao(request)
-    resultado = social_pipeline.executar_ciclo(usuario, _decisoes_candidatas_social(25), forcar=True)
-    auth.registrar_geracao(usuario)
-    return resultado
-
-
-@app.get("/social/imagem/{nome}")
-def social_obter_imagem(nome: str):
-    """Serve as imagens geradas pro post automático - precisa ser público
-    (sem cookie de sessão) pra Graph API da Meta conseguir buscar a URL ao
-    publicar o carrossel. Ver _PREFIXOS_PUBLICOS acima."""
-    caminho = os.path.join(social_pipeline.PASTA_IMAGENS, nome)
-    if "/" in nome or ".." in nome or not os.path.isfile(caminho):
-        raise HTTPException(status_code=404, detail="Imagem não encontrada")
-    return FileResponse(caminho, media_type="image/png")
-
-
 @app.get("/")
 def raiz():
     return {
@@ -1673,8 +1477,5 @@ def raiz():
             "/opportunities/{id}/imagens-sugeridas", "/news/{id}/imagens-sugeridas",
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
             "/auth/users",
-            "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
-            "/social/logo", "/social/fundo", "/social/preview", "/social/gerar-identidade",
-            "/admin/coletar-decisoes-agora",
         ],
     }
