@@ -1,14 +1,17 @@
 """
 Login local do ATLAS - multiusuário, mas sem cadastro aberto: o dono do
-ATLAS (primeiro login, criado no bootstrap, sempre nível "admin") cria um
-usuário e uma senha para cada pessoa da equipe na tela "Usuários",
-escolhendo o nível de acesso dela (básico/intermediário/plus). Ninguém
-escolhe o próprio login sozinho, exceto o dono no primeiro acesso.
+ATLAS (primeiro login, criado no bootstrap, sempre nível "admin") convida
+cada pessoa da equipe pela tela "Usuários", escolhendo só o nível de
+acesso dela (básico/intermediário/plus). O convite vira um link de uso
+único (ver criar_convite/aceitar_convite) que o dono manda pra pessoa por
+fora da plataforma (WhatsApp, e-mail etc) - é a própria pessoa quem
+escolhe seu usuário e senha ao abrir o link, então ninguém (nem o dono)
+fica sabendo o login de mais ninguém.
 
 Senha nunca é guardada em texto puro - PBKDF2-HMAC-SHA256 com salt
 aleatório por credencial (só a biblioteca padrão do Python, sem
 dependência nova). Sessão é um token aleatório opaco guardado no SQLite
-(sobrevive a reinício do backend), amarrado ao usuário que a criou, e
+(sobrevive a reinicio do backend), amarrado ao usuário que a criou, e
 devolvida ao navegador como cookie HttpOnly - o front nunca vê nem
 manipula o token diretamente.
 
@@ -17,7 +20,9 @@ equipe, cada um com um teto semanal combinado de pareceres+posts gerados
 e (a partir do intermediário) um orçamento diário em USD pro chat do
 Copiloto ATLAS - básico não tem chat. O custo do chat é estimado a partir
 dos tokens reais que a Claude API devolve em cada resposta (ver
-registrar_gasto_chat), não é um valor fixo por pergunta.
+registrar_gasto_chat), não é um valor fixo por pergunta. Básico também
+não tem Minha Carteira nem Estúdio Visual - só Radar e Notícias (ver
+recursosAvancados).
 """
 import hashlib
 import secrets
@@ -27,31 +32,34 @@ import app_db
 
 ITERACOES_PBKDF2 = 200_000
 DURACAO_SESSAO_DIAS = 30
-
-# Trava de força bruta no login - sem isso, /auth/login aceitava tentativas
-# ilimitadas (nada no proxy/infra do Railway limita isso por conta própria).
-# Por usuário tentado, não por IP: protege a conta mesmo contra tentativas
-# vindas de vários endereços diferentes.
-LIMITE_FALHAS_LOGIN = 5
-BLOQUEIO_LOGIN_MINUTOS = 15
+DURACAO_CONVITE_DIAS = 7
 _SALT_FANTASMA = "0" * 32  # usado só pra gastar o mesmo tempo de CPU quando o usuário não existe
 
 NIVEIS_CRIAVEIS = ("basico", "intermediario", "plus")  # "admin" só existe via bootstrap
 
-# Preço do modelo Claude realmente usado pelo Copiloto (ver
-# ai/claude_chat.py: MODELO, claude-sonnet-5) - USD por milhão de tokens,
-# usado só pra estimar o gasto do chat contra o orçamento diário de cada
-# nível. Ajuste junto se ATLAS_CLAUDE_MODEL mudar de modelo/tier - preços
-# desatualizados fazem o usuário bater no limite diário mais cedo (ou
-# tarde) do que o custo real justifica.
-_PRECO_ENTRADA_POR_MTOK_USD = 2.0
-_PRECO_SAIDA_POR_MTOK_USD = 10.0
+# Preço aproximado de um modelo Claude classe Sonnet (USD por milhão de
+# tokens) - usado só pra estimar o gasto do chat contra o orçamento diário
+# de cada nível, não precisa bater centavo a centavo com a fatura real.
+_PRECO_ENTRADA_POR_MTOK_USD = 3.0
+_PRECO_SAIDA_POR_MTOK_USD = 15.0
 
 LIMITES_NIVEL = {
-    "basico": {"chat": False, "chatUsdDia": 0.0, "pareceresPostsSemana": 10},
-    "intermediario": {"chat": True, "chatUsdDia": 1.0, "pareceresPostsSemana": 15},
-    "plus": {"chat": True, "chatUsdDia": 2.0, "pareceresPostsSemana": 30},
-    "admin": {"chat": True, "chatUsdDia": None, "pareceresPostsSemana": None},
+    "basico": {
+        "chat": False, "chatUsdDia": 0.0, "pareceresPostsSemana": 10,
+        "recursosAvancados": False,
+    },
+    "intermediario": {
+        "chat": True, "chatUsdDia": 1.0, "pareceresPostsSemana": 15,
+        "recursosAvancados": True,
+    },
+    "plus": {
+        "chat": True, "chatUsdDia": 2.0, "pareceresPostsSemana": 30,
+        "recursosAvancados": True,
+    },
+    "admin": {
+        "chat": True, "chatUsdDia": None, "pareceresPostsSemana": None,
+        "recursosAvancados": True,
+    },
 }
 
 
@@ -100,6 +108,55 @@ def remover_usuario(usuario: str) -> None:
     app_db.remover_usuario(usuario)
 
 
+# --- convites de acesso (ver docstring do módulo) -------------------------
+
+def _agora() -> datetime:
+    return datetime.now()
+
+
+def criar_convite(nivel: str, rotulo: str, criado_por: str) -> str:
+    if nivel not in NIVEIS_CRIAVEIS:
+        raise ValueError(f"Nível inválido: {nivel!r} (use um de {NIVEIS_CRIAVEIS})")
+    token = secrets.token_urlsafe(24)
+    expira_em = (_agora() + timedelta(days=DURACAO_CONVITE_DIAS)).strftime("%Y-%m-%dT%H:%M:%S")
+    app_db.criar_convite(token, nivel, rotulo.strip(), criado_por, expira_em)
+    return token
+
+
+def listar_convites() -> list[dict]:
+    return app_db.listar_convites()
+
+
+def remover_convite(token: str) -> None:
+    app_db.remover_convite(token)
+
+
+def validar_convite(token: str) -> dict | None:
+    """{"nivel": ..., "rotulo": ...} se o convite existe, não foi usado e
+    não expirou - None caso contrário (a página de aceitar mostra "convite
+    inválido ou já usado" sem distinguir o motivo, pra não vazar detalhe
+    de convite alheio)."""
+    convite = app_db.obter_convite(token)
+    if not convite or convite["usadoEm"]:
+        return None
+    if convite["expiraEm"] <= _agora().strftime("%Y-%m-%dT%H:%M:%S"):
+        return None
+    return {"nivel": convite["nivel"], "rotulo": convite["rotulo"]}
+
+
+def aceitar_convite(token: str, usuario: str, senha: str) -> str | None:
+    """Cria o login com o nível embutido no convite e marca o convite como
+    usado - devolve o nível criado, ou None se o convite não era mais
+    válido (checagem de novo aqui, não só na validação anterior: evita
+    corrida de dois aceites simultâneos do mesmo link)."""
+    info = validar_convite(token)
+    if not info:
+        return None
+    criar_usuario(usuario, senha, info["nivel"])
+    app_db.marcar_convite_usado(token, usuario.strip())
+    return info["nivel"]
+
+
 def verificar_login(usuario: str, senha: str) -> bool:
     credencial = app_db.obter_credencial(usuario)
     if not credencial:
@@ -107,35 +164,6 @@ def verificar_login(usuario: str, senha: str) -> bool:
         return False
     senha_hash = _hash_senha(senha, credencial["senhaSalt"])
     return secrets.compare_digest(credencial["senhaHash"], senha_hash)
-
-
-def verificar_bloqueio_login(usuario: str) -> int | None:
-    """Minutos restantes de bloqueio por excesso de tentativas erradas, ou
-    None se pode tentar normalmente. Chame ANTES de verificar_login."""
-    tentativa = app_db.obter_tentativa_login(usuario)
-    bloqueado_ate = tentativa["bloqueadoAte"]
-    if not bloqueado_ate:
-        return None
-    restante = datetime.strptime(bloqueado_ate, "%Y-%m-%dT%H:%M:%S") - datetime.now()
-    if restante.total_seconds() <= 0:
-        return None
-    return max(1, round(restante.total_seconds() / 60))
-
-
-def registrar_tentativa_login(usuario: str, sucesso: bool) -> None:
-    """Chame depois de verificar_login - sucesso limpa o contador; falha
-    incrementa e bloqueia temporariamente ao atingir LIMITE_FALHAS_LOGIN."""
-    usuario = usuario.strip()
-    if sucesso:
-        app_db.limpar_tentativas_login(usuario)
-        return
-    falhas = app_db.obter_tentativa_login(usuario)["falhas"] + 1
-    bloqueado_ate = None
-    if falhas >= LIMITE_FALHAS_LOGIN:
-        bloqueado_ate = (datetime.now() + timedelta(minutes=BLOQUEIO_LOGIN_MINUTOS)).strftime(
-            "%Y-%m-%dT%H:%M:%S"
-        )
-    app_db.registrar_falha_login(usuario, falhas, bloqueado_ate)
 
 
 def criar_sessao(usuario: str) -> str:
@@ -220,6 +248,13 @@ def verificar_chat_permitido(usuario: str, nivel: str) -> tuple[bool, str | None
             f"Orçamento diário do chat (US$ {limite_usd:.2f}) foi atingido. Volta amanhã."
         )
     return True, None
+
+
+def verificar_recursos_avancados(nivel: str) -> bool:
+    """Minha Carteira e Estúdio Visual - básico não tem, todos os outros
+    níveis (a partir de intermediário) têm."""
+    limites = LIMITES_NIVEL.get(nivel, LIMITES_NIVEL["basico"])
+    return limites["recursosAvancados"]
 
 
 def registrar_gasto_chat(usuario: str, tokens_entrada: int, tokens_saida: int) -> None:
