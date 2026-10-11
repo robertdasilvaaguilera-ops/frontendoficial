@@ -11,7 +11,7 @@ fica sabendo o login de mais ninguém.
 Senha nunca é guardada em texto puro - PBKDF2-HMAC-SHA256 com salt
 aleatório por credencial (só a biblioteca padrão do Python, sem
 dependência nova). Sessão é um token aleatório opaco guardado no SQLite
-(sobrevive a reinicio do backend), amarrado ao usuário que a criou, e
+(sobrevive a reinício do backend), amarrado ao usuário que a criou, e
 devolvida ao navegador como cookie HttpOnly - o front nunca vê nem
 manipula o token diretamente.
 
@@ -36,6 +36,9 @@ DURACAO_CONVITE_DIAS = 7
 _SALT_FANTASMA = "0" * 32  # usado só pra gastar o mesmo tempo de CPU quando o usuário não existe
 
 NIVEIS_CRIAVEIS = ("basico", "intermediario", "plus")  # "admin" só existe via bootstrap
+
+LIMITE_FALHAS_LOGIN = 5
+BLOQUEIO_LOGIN_MINUTOS = 15
 
 # Preço aproximado de um modelo Claude classe Sonnet (USD por milhão de
 # tokens) - usado só pra estimar o gasto do chat contra o orçamento diário
@@ -164,6 +167,35 @@ def verificar_login(usuario: str, senha: str) -> bool:
         return False
     senha_hash = _hash_senha(senha, credencial["senhaSalt"])
     return secrets.compare_digest(credencial["senhaHash"], senha_hash)
+
+
+def verificar_bloqueio_login(usuario: str) -> int | None:
+    """Minutos restantes de bloqueio por excesso de tentativas erradas, ou
+    None se pode tentar normalmente. Chame ANTES de verificar_login."""
+    tentativa = app_db.obter_tentativa_login(usuario)
+    bloqueado_ate = tentativa["bloqueadoAte"]
+    if not bloqueado_ate:
+        return None
+    restante = datetime.strptime(bloqueado_ate, "%Y-%m-%dT%H:%M:%S") - datetime.now()
+    if restante.total_seconds() <= 0:
+        return None
+    return max(1, round(restante.total_seconds() / 60))
+
+
+def registrar_tentativa_login(usuario: str, sucesso: bool) -> None:
+    """Chame depois de verificar_login - sucesso limpa o contador; falha
+    incrementa e bloqueia temporariamente ao atingir LIMITE_FALHAS_LOGIN."""
+    usuario = usuario.strip()
+    if sucesso:
+        app_db.limpar_tentativas_login(usuario)
+        return
+    falhas = app_db.obter_tentativa_login(usuario)["falhas"] + 1
+    bloqueado_ate = None
+    if falhas >= LIMITE_FALHAS_LOGIN:
+        bloqueado_ate = (datetime.now() + timedelta(minutes=BLOQUEIO_LOGIN_MINUTOS)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+    app_db.registrar_falha_login(usuario, falhas, bloqueado_ate)
 
 
 def criar_sessao(usuario: str) -> str:

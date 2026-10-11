@@ -21,19 +21,24 @@ dispositivo/aplicacaoPratica) e gerado sob demanda via POST
 /opportunities/{id}/parecer (Claude - ver ai/parecer.py), nao vem
 pre-computado no Excel.
 """
+import io
+import json
 import os
 import re
 import hashlib
 import pickle
+import threading
 import unicodedata
+import uuid
 import pandas as pd
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from PIL import Image
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 # Le o arquivo .env (nesta mesma pasta) ANTES de importar ai.claude_chat,
@@ -56,6 +61,12 @@ from economics.indice_prospeccao import calcular_indice_prospeccao
 import app_db
 import auth
 import coleta_scheduler
+import main as atlas_engine
+from social import content as social_content
+from social import pipeline as social_pipeline
+from social import render as social_render
+from social import scheduler as social_scheduler
+from social.instagram import ErroGraphAPI, testar_conexao as testar_conexao_instagram
 import paths
 
 PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
@@ -83,7 +94,14 @@ def _rota_publica(path: str) -> bool:
     # /convites/{token}[/aceitar] tem que ser público - é a página que a
     # pessoa convidada abre ANTES de ter qualquer login. O token em si (não
     # adivinhável, ver auth.criar_convite) é o segredo, não a sessão.
-    return path in _ROTAS_PUBLICAS or path.startswith("/convites/")
+    # /social/imagem/{nome} também é público - os servidores da Meta (Graph
+    # API) buscam essas URLs pra publicar o carrossel, sem cookie de sessão
+    # nenhum (mesmo princípio do antigo endpoint /automacao/imagem/{nome}).
+    return (
+        path in _ROTAS_PUBLICAS
+        or path.startswith("/convites/")
+        or path.startswith("/social/imagem/")
+    )
 
 # ATLAS_COOKIE_SECURE=1 em produção (front e backend em domínios
 # diferentes - Vercel e Railway) - cookie cross-site só é enviado pelo
@@ -200,6 +218,16 @@ def _exigir_cota_geracao(request: Request) -> str:
             status_code=429,
             detail=f"Limite semanal de {limite} pareceres/posts do seu nível foi atingido.",
         )
+    return info["usuario"]
+
+
+def _exigir_sessao(request: Request) -> str:
+    """Qualquer nível de usuário logado - usado pela Mídia Social, que é
+    uma ferramenta de toda a equipe, não só do dono (diferente de
+    /auth/users, que continua exclusivo do admin)."""
+    info = _sessao_atual(request)
+    if not info:
+        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
     return info["usuario"]
 
 
@@ -489,6 +517,11 @@ def _aquecer_cache_no_boot():
     o usuário abre depois de iniciar o backend é que pagava os vários
     segundos de leitura do arquivo, parecendo o sistema inteiro travado."""
     _carregar_dados()
+    # Religa o agendador de posts automáticos de Instagram nos horários já
+    # salvos em social_config - ver social/scheduler.py. Passa esta função
+    # (não o módulo social) porque é ela quem sabe montar a lista de
+    # decisões candidatas a partir do DataFrame carregado acima.
+    social_scheduler.iniciar(lambda: _decisoes_candidatas_social(25))
 
 
 @app.on_event("startup")
@@ -497,6 +530,35 @@ def _iniciar_coleta_agendada():
     próprio serviço - roda sozinha no Railway, sem depender de nenhum
     computador ligado. Ver coleta_scheduler.py."""
     coleta_scheduler.iniciar()
+
+
+def _decisoes_candidatas_social(limit: int = 25) -> list[dict]:
+    """Mesma seleção/formato usado pela extinta automação externa
+    (`/automacao/decisoes-recentes`) - decisões mais recentes, mais novas
+    primeiro, no shape que `social/content.py` espera."""
+    df = _carregar_dados()
+    if df.empty:
+        return []
+    df_decisoes = df[df["tipo_conteudo"] == "decisao"]
+    if "data_publicacao" in df_decisoes.columns:
+        df_decisoes = df_decisoes.sort_values("data_publicacao", ascending=False)
+    df_pagina = df_decisoes.head(max(1, min(limit, 100)))
+    resultado = []
+    for _, row in df_pagina.iterrows():
+        opp = _linha_para_opportunity(row)
+        resultado.append({
+            "id": opp["id"],
+            "titulo": opp["titulo"],
+            "tribunal": opp["tribunal"],
+            "data_julgamento": opp["decisao"]["data"],
+            "setor_economico": ", ".join(opp["setores"]) if opp["setores"] else "",
+            "mecanismo": opp["mecanismo"],
+            "tributos": opp["tributos"],
+            "resumo": opp["decisao"]["ementa"] or opp["resumoExecutivo"],
+            "impacto_estimado": opp["impactoFinanceiro"],
+            "link_fonte": opp["decisao"]["urlOficial"],
+        })
+    return resultado
 
 
 def _gerar_id(row) -> str:
@@ -733,28 +795,29 @@ class ClientRequest(BaseModel):
 
 @app.get("/clients")
 def listar_clientes(request: Request):
-    _exigir_recursos_avancados(request)
-    return app_db.listar_clientes()
+    usuario = _exigir_recursos_avancados(request)
+    return app_db.listar_clientes(usuario)
 
 
 @app.post("/clients")
 def criar_cliente(req: ClientRequest, request: Request):
-    _exigir_recursos_avancados(request)
+    usuario = _exigir_recursos_avancados(request)
     if not req.nome.strip():
         raise HTTPException(status_code=400, detail="Nome do cliente é obrigatório")
-    return app_db.inserir_cliente(req.model_dump())
+    return app_db.inserir_cliente(req.model_dump(), usuario)
 
 
 @app.delete("/clients/{id}")
 def deletar_cliente(id: str, request: Request):
-    _exigir_recursos_avancados(request)
-    if not app_db.remover_cliente(id):
+    usuario = _exigir_recursos_avancados(request)
+    if not app_db.remover_cliente(id, usuario):
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
     return {"ok": True}
 
 
 @app.get("/summary")
-def obter_resumo():
+def obter_resumo(request: Request):
+    usuario = _exigir_sessao(request)
     df = _carregar_dados()
     if df.empty:
         return {
@@ -766,7 +829,7 @@ def obter_resumo():
         lambda f: _classificar_fonte_noticia(f) != "Tribunal"
     )
     return {
-        "totalClientes": app_db.contar_clientes(),
+        "totalClientes": app_db.contar_clientes(usuario),
         "oportunidadesHoje": int((df_decisoes.get("risco", 0) < 50).sum()),
         "riscosHoje": int((df_decisoes.get("risco", 0) >= 50).sum()),
         "alteracoesLegislativas": int(legislativas.sum()),
@@ -916,26 +979,28 @@ class ChatRequest(BaseModel):
     conversaId: str | None = None
 
 
-def _exigir_acesso_chat(request: Request) -> None:
+def _exigir_acesso_chat(request: Request) -> str:
     """Checagem "só o nível, sem olhar orçamento" - usada nos endpoints de
     histórico (listar/ler/apagar conversa), que não custam nada de Claude
     então não fazem sentido cortar por orçamento diário, só por nível."""
     info = _sessao_atual(request)
-    nivel = info["nivel"] if info else "basico"
-    if not auth.LIMITES_NIVEL.get(nivel, auth.LIMITES_NIVEL["basico"])["chat"]:
+    if not info:
+        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
+    if not auth.LIMITES_NIVEL.get(info["nivel"], auth.LIMITES_NIVEL["basico"])["chat"]:
         raise HTTPException(status_code=403, detail="Seu nível de acesso não inclui o Copiloto ATLAS.")
+    return info["usuario"]
 
 
 @app.get("/copilot/conversas")
 def listar_conversas(request: Request):
-    _exigir_acesso_chat(request)
-    return app_db.listar_conversas()
+    usuario = _exigir_acesso_chat(request)
+    return app_db.listar_conversas(usuario)
 
 
 @app.get("/copilot/conversas/{id}")
 def obter_conversa(id: str, request: Request):
-    _exigir_acesso_chat(request)
-    conversa = app_db.obter_conversa(id)
+    usuario = _exigir_acesso_chat(request)
+    conversa = app_db.obter_conversa(id, usuario)
     if conversa is None:
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return conversa
@@ -943,8 +1008,8 @@ def obter_conversa(id: str, request: Request):
 
 @app.delete("/copilot/conversas/{id}")
 def deletar_conversa(id: str, request: Request):
-    _exigir_acesso_chat(request)
-    if not app_db.remover_conversa(id):
+    usuario = _exigir_acesso_chat(request)
+    if not app_db.remover_conversa(id, usuario):
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     return {"ok": True}
 
@@ -1010,7 +1075,7 @@ def copiloto_chat(req: ChatRequest, request: Request):
         {"role": "assistant", "content": resposta, "fontes": fontes},
     ]
     titulo = req.pergunta.strip()[:80]
-    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas)
+    conversa = app_db.salvar_conversa(req.conversaId, titulo, mensagens_salvas, usuario)
 
     return {
         "resposta": resposta,
@@ -1251,6 +1316,390 @@ def imagens_sugeridas_noticia_endpoint(id: str):
     return _imagens_sugeridas_impl(id)
 
 
+# Coleta manual roda em background numa thread - sem isso, uma rodada
+# completa (que com o proxy BR pode passar de muitos minutos) derruba a
+# conexão HTTP antes de terminar (a borda do Railway não segura uma
+# conexão parada por tanto tempo), e o navegador mostra "Failed to fetch"
+# mesmo com a coleta seguindo bem no servidor. O lock evita duas coletas
+# manuais rodando ao mesmo tempo.
+_coleta_manual_em_andamento = threading.Lock()
+
+
+@app.post("/admin/coletar-decisoes-agora")
+def admin_coletar_decisoes_agora(request: Request):
+    _exigir_admin(request)
+    if not _coleta_manual_em_andamento.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Já tem uma coleta rodando agora - aguarde ela terminar.")
+
+    def _rodar():
+        try:
+            atlas_engine.main()
+        except Exception as e:
+            print(f"[ERRO] Coleta manual (coletar agora) falhou: {e}")
+        finally:
+            _coleta_manual_em_andamento.release()
+
+    threading.Thread(target=_rodar, daemon=True).start()
+    # _carregar_dados() já detecta sozinha que o Excel mudou (mtime) e relê -
+    # não precisa invalidar nada aqui manualmente.
+    return {"ok": True, "iniciado": True}
+
+
+# Restauração pontual do Excel de decisões perdido nos redeploys anteriores
+# ao ATLAS_DATA_DIR entrar em vigor (dados recuperados de um backup local
+# pré-migração) - endpoint de uso único, remover depois de restaurar.
+@app.post("/admin/restaurar-decisoes-backup")
+async def admin_restaurar_decisoes_backup(
+    request: Request,
+    arquivo: UploadFile = File(...),
+):
+    _exigir_admin(request)
+
+    conteudo = await arquivo.read()
+    df = pd.read_excel(io.BytesIO(conteudo))
+    df.to_excel(paths.caminho("reports", "oportunidades.xlsx"), index=False)
+
+    vistos = set(df["link"].dropna().astype(str)) if "link" in df.columns else set()
+    with open(paths.caminho("logs", "vistos.json"), "w", encoding="utf-8") as f:
+        json.dump(list(vistos), f, ensure_ascii=False)
+
+    return {"ok": True, "linhas_restauradas": len(df), "links_marcados_vistos": len(vistos)}
+
+
+# --- Mídia Social (automação de posts de Instagram) -----------------------
+# Aba "Mídia Social": o usuário configura temas/objetivos/tom, horários e as
+# credenciais do Instagram; o backend gera e publica os posts sozinho, nos
+# horários configurados (ver social/scheduler.py) - substitui a automação
+# externa que rodava fora do produto. Restrito a qualquer usuário logado
+# (guarda o token de acesso da própria conta do Instagram, mas cada login
+# só vê/edita a própria config - ver _exigir_sessao).
+
+_HEX_COR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+# Contraste mínimo (razão WCAG) pra evitar salvar uma identidade ilegível -
+# o texto marcado é sempre escuro (social_render.COR_TEXTO_SOBRE_DESTAQUE),
+# então a cor de destaque precisa ser clara/vibrante o bastante contra ele
+# e contra o fundo escuro (senão o grifo "desaparece").
+_CONTRASTE_MIN_DESTAQUE_TEXTO = 2.2
+_CONTRASTE_MIN_DESTAQUE_FUNDO = 1.4
+
+
+def _validar_contraste_destaque(cor_destaque_hex: str, cor_fundo_escuro_hex: str) -> None:
+    cor_destaque = social_render.hex_para_rgb(cor_destaque_hex, social_render.MARCA_PADRAO.cor_destaque)
+    cor_fundo = social_render.hex_para_rgb(cor_fundo_escuro_hex, social_render.MARCA_PADRAO.cor_fundo_escuro)
+    contraste_texto = social_render.razao_contraste(cor_destaque, social_render.COR_TEXTO_SOBRE_DESTAQUE)
+    contraste_fundo = social_render.razao_contraste(cor_destaque, cor_fundo)
+    if contraste_texto < _CONTRASTE_MIN_DESTAQUE_TEXTO:
+        raise HTTPException(
+            status_code=400,
+            detail="Cor de destaque muito escura - o texto grifado (sempre escuro) ficaria "
+                   "difícil de ler. Escolha uma cor mais clara ou vibrante.",
+        )
+    if contraste_fundo < _CONTRASTE_MIN_DESTAQUE_FUNDO:
+        raise HTTPException(
+            status_code=400,
+            detail="Cor de destaque muito parecida com o fundo escuro - o grifo ficaria quase "
+                   "invisível. Escolha uma cor com mais contraste.",
+        )
+
+
+class SocialConfigRequest(BaseModel):
+    ativo: bool | None = None
+    temas: list[str] | None = None
+    objetivos: str | None = None
+    tom: str | None = None
+    horarios: list[str] | None = None
+    igAccessToken: str | None = None
+    igBusinessAccountId: str | None = None
+    marcaNome: str | None = None
+    marcaHandle: str | None = None
+    corFundoClaro: str | None = None
+    corFundoEscuro: str | None = None
+    corDestaque: str | None = None
+    estilo: str | None = None
+    textoClaro: bool | None = None
+    posicaoVertical: str | None = None
+    alinhamento: str | None = None
+
+
+_HORARIO_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _mascarar_token(token: str) -> str:
+    if not token:
+        return ""
+    if len(token) <= 8:
+        return "•" * len(token)
+    return f"{token[:4]}{'•' * (len(token) - 8)}{token[-4:]}"
+
+
+@app.get("/social/config")
+def social_obter_config(request: Request):
+    usuario = _exigir_sessao(request)
+    config = app_db.obter_social_config(usuario)
+    return {
+        **config,
+        "igAccessToken": _mascarar_token(config["igAccessToken"]),
+        "temToken": bool(config["igAccessToken"]),
+    }
+
+
+@app.put("/social/config")
+def social_salvar_config(req: SocialConfigRequest, request: Request):
+    usuario = _exigir_sessao(request)
+    if req.horarios is not None:
+        invalidos = [h for h in req.horarios if not _HORARIO_RE.match(h)]
+        if invalidos:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Horário inválido (use HH:MM): {', '.join(invalidos)}",
+            )
+    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
+        valor = getattr(req, campo)
+        if valor is not None and not _HEX_COR_RE.match(valor):
+            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
+    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
+        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
+    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
+        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
+    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
+        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
+    if req.corDestaque is not None or req.corFundoEscuro is not None:
+        atual = app_db.obter_social_config(usuario)
+        _validar_contraste_destaque(
+            req.corDestaque if req.corDestaque is not None else atual["corDestaque"],
+            req.corFundoEscuro if req.corFundoEscuro is not None else atual["corFundoEscuro"],
+        )
+    dados = req.model_dump(exclude_unset=True)
+    # campo vazio no form de token não deve apagar o token já salvo -
+    # só atualiza se o usuário realmente digitou um novo.
+    if "igAccessToken" in dados and not dados["igAccessToken"]:
+        dados.pop("igAccessToken")
+    config = app_db.salvar_social_config(usuario, dados)
+    social_scheduler.recarregar()
+    return {
+        **config,
+        "igAccessToken": _mascarar_token(config["igAccessToken"]),
+        "temToken": bool(config["igAccessToken"]),
+    }
+
+
+class TestarConexaoRequest(BaseModel):
+    igAccessToken: str | None = None
+    igBusinessAccountId: str | None = None
+
+
+@app.post("/social/test-connection")
+def social_testar_conexao(req: TestarConexaoRequest, request: Request):
+    """Valida token + ID da conta - usa os valores enviados no corpo (tela
+    de configuração, antes de salvar) ou, se omitidos, os já salvos."""
+    usuario = _exigir_sessao(request)
+    config = app_db.obter_social_config(usuario)
+    token = req.igAccessToken or config["igAccessToken"]
+    conta_id = req.igBusinessAccountId or config["igBusinessAccountId"]
+    if not token or not conta_id:
+        raise HTTPException(status_code=400, detail="Informe o token e o ID da conta do Instagram")
+    try:
+        info = testar_conexao_instagram(token, conta_id)
+    except ErroGraphAPI as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"A Meta recusou a credencial (HTTP {e.status_code}): {e.resposta}",
+        )
+    return {"ok": True, "username": info.get("username"), "nome": info.get("name")}
+
+
+_EXTENSOES_IMAGEM = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+_TAMANHO_MAX_IMAGEM = 5 * 1024 * 1024
+
+
+async def _salvar_imagem_upload(
+    arquivo: UploadFile, prefixo: str, resolucao_minima: tuple[int, int] | None = None
+) -> str:
+    """Valida tipo/tamanho/resolução e grava no volume persistente
+    (PASTA_IMAGENS, servido publicamente por /social/imagem/{nome}) - usado
+    tanto pelo logo quanto pelos fundos customizados. Devolve o nome do
+    arquivo salvo.
+
+    resolucao_minima: (largura, altura) mínima aceita - protege contra uma
+    imagem pequena demais ficar borrada quando esticada pro post (o fundo
+    cobre 1080x1350 inteiro; o logo é menos sensível, por isso só o fundo
+    passa esse parâmetro)."""
+    extensao = _EXTENSOES_IMAGEM.get(arquivo.content_type)
+    if not extensao:
+        raise HTTPException(status_code=400, detail="Envie um PNG, JPEG ou WEBP")
+    conteudo = await arquivo.read()
+    if len(conteudo) > _TAMANHO_MAX_IMAGEM:
+        raise HTTPException(status_code=400, detail="Imagem muito grande (máximo 5MB)")
+    # O content-type acima vem do navegador (o cliente escolhe o valor, não
+    # é confiável sozinho) - decodificar de verdade confirma que os bytes
+    # são mesmo uma imagem válida antes de gravar no volume e servir
+    # publicamente em /social/imagem/{nome}.
+    try:
+        with Image.open(io.BytesIO(conteudo)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(conteudo)) as img:
+            largura, altura = img.size
+    except Exception:
+        raise HTTPException(status_code=400, detail="Não consegui ler essa imagem - arquivo corrompido?")
+    if resolucao_minima:
+        min_largura, min_altura = resolucao_minima
+        if largura < min_largura or altura < min_altura:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Imagem muito pequena ({largura}x{altura}px) - envie pelo menos "
+                       f"{min_largura}x{min_altura}px pra não ficar borrada no post.",
+            )
+    nome_arquivo = f"{prefixo}_{uuid.uuid4().hex}{extensao}"
+    with open(os.path.join(social_pipeline.PASTA_IMAGENS, nome_arquivo), "wb") as f:
+        f.write(conteudo)
+    return nome_arquivo
+
+
+@app.post("/social/logo")
+async def social_subir_logo(request: Request, arquivo: UploadFile = File(...)):
+    """Logo do escritório/perfil pro rodapé de marca dos posts (ver
+    social/render.py) - guardado no mesmo volume persistente das imagens
+    geradas (PASTA_IMAGENS), servido pela rota pública /social/imagem/{nome}
+    que já existe (a Graph API também precisa alcançar essas URLs)."""
+    usuario = _exigir_sessao(request)
+    nome_arquivo = await _salvar_imagem_upload(arquivo, "logo")
+    config = app_db.salvar_social_config(usuario, {"logoPath": nome_arquivo})
+    return {"logoPath": config["logoPath"]}
+
+
+@app.delete("/social/logo")
+def social_remover_logo(request: Request):
+    usuario = _exigir_sessao(request)
+    config = app_db.salvar_social_config(usuario, {"logoPath": ""})
+    return {"logoPath": config["logoPath"]}
+
+
+@app.post("/social/fundo")
+async def social_subir_fundo(request: Request, slide: int, arquivo: UploadFile = File(...)):
+    """Fundo próprio do escritório (arte já pronta) pro slide 1 ou 2 - o
+    sistema escreve o texto gerado por cima, na mesma área/fonte/cor já
+    configuradas (ver render._fundo_slide). Substitui o degradê da
+    identidade de marca só pra esse slide."""
+    usuario = _exigir_sessao(request)
+    if slide not in (1, 2):
+        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
+    # o fundo cobre a imagem 1080x1350 inteira (ver render._fundo_slide) -
+    # abaixo de ~2/3 disso ele fica visivelmente esticado/borrado.
+    nome_arquivo = await _salvar_imagem_upload(arquivo, f"fundo{slide}", resolucao_minima=(720, 900))
+    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": nome_arquivo})
+    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
+
+
+@app.delete("/social/fundo")
+def social_remover_fundo(request: Request, slide: int):
+    usuario = _exigir_sessao(request)
+    if slide not in (1, 2):
+        raise HTTPException(status_code=400, detail="slide precisa ser 1 ou 2")
+    config = app_db.salvar_social_config(usuario, {f"fundo{slide}Path": ""})
+    return {f"fundo{slide}Path": config[f"fundo{slide}Path"]}
+
+
+class SocialIdentidadeIARequest(BaseModel):
+    descricao: str
+
+
+@app.post("/social/gerar-identidade")
+def social_gerar_identidade(req: SocialIdentidadeIARequest, request: Request):
+    """Traduz uma descrição em texto livre (ex: "quero algo elegante, vinho
+    e dourado") em cores + estilo tipográfico sugeridos - preenche o
+    formulário, mas não salva nem publica nada sozinho (o usuário revisa,
+    gera prévia e só então clica em Salvar)."""
+    _exigir_sessao(request)
+    descricao = req.descricao.strip()
+    if not descricao:
+        raise HTTPException(status_code=400, detail="Descreva a identidade visual que você imagina")
+    try:
+        return social_content.gerar_identidade_visual(descricao)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao gerar identidade com IA: {e}")
+
+
+class SocialPreviewRequest(BaseModel):
+    marcaNome: str | None = None
+    marcaHandle: str | None = None
+    corFundoClaro: str | None = None
+    corFundoEscuro: str | None = None
+    corDestaque: str | None = None
+    estilo: str | None = None
+    textoClaro: bool | None = None
+    posicaoVertical: str | None = None
+    alinhamento: str | None = None
+
+
+_PARAGRAFO_PREVIEW = (
+    "STF decide que o benefício fiscal vale mesmo sem homologação expressa da Receita, "
+    "§§independentemente de ato declaratório posterior§§."
+)
+_SUB2_PREVIEW = "Análise §§gerada automaticamente pela {marca}§§ a partir da decisão real de hoje."
+
+
+@app.post("/social/preview")
+def social_preview(req: SocialPreviewRequest, request: Request):
+    """Gera as duas imagens de exemplo com a identidade visual atual (salva
+    + overrides não salvos ainda, pra pré-visualizar cor/logo antes de
+    clicar em Salvar) - usa um texto fixo de exemplo, nunca uma decisão
+    real, então pode ser chamado quantas vezes quiser sem gastar Claude."""
+    usuario = _exigir_sessao(request)
+    for campo in ("corFundoClaro", "corFundoEscuro", "corDestaque"):
+        valor = getattr(req, campo)
+        if valor is not None and not _HEX_COR_RE.match(valor):
+            raise HTTPException(status_code=400, detail=f"Cor inválida em {campo} (use #RRGGBB)")
+    if req.estilo is not None and req.estilo not in social_render.FONTES_ESTILOS:
+        raise HTTPException(status_code=400, detail=f"Estilo inválido: {req.estilo}")
+    if req.posicaoVertical is not None and req.posicaoVertical not in social_render.POSICOES_VERTICAIS:
+        raise HTTPException(status_code=400, detail=f"Posição vertical inválida: {req.posicaoVertical}")
+    if req.alinhamento is not None and req.alinhamento not in social_render.ALINHAMENTOS_HORIZONTAIS:
+        raise HTTPException(status_code=400, detail=f"Alinhamento inválido: {req.alinhamento}")
+    config = {**app_db.obter_social_config(usuario), **req.model_dump(exclude_unset=True)}
+    marca = social_pipeline.marca_da_config(config)
+    nome1, nome2 = "preview_1.png", "preview_2.png"
+    social_render.render_slide1(
+        _PARAGRAFO_PREVIEW, os.path.join(social_pipeline.PASTA_IMAGENS, nome1), marca=marca
+    )
+    social_render.render_slide2(
+        "Inteligência tributária, todos os dias.",
+        _SUB2_PREVIEW.format(marca=marca.nome),
+        os.path.join(social_pipeline.PASTA_IMAGENS, nome2),
+        marca=marca,
+    )
+    return {"imagem1Path": nome1, "imagem2Path": nome2}
+
+
+@app.get("/social/posts")
+def social_listar_posts(request: Request, limit: int = 30):
+    usuario = _exigir_sessao(request)
+    return app_db.listar_social_posts(usuario, limit)
+
+
+@app.post("/social/run-now")
+def social_publicar_agora(request: Request):
+    """Botão "Publicar agora" - roda o ciclo completo na hora (ignora o
+    toggle "ativo" e o agendamento), pra testar a configuração de ponta a
+    ponta sem esperar o próximo horário. Publica de verdade se as
+    credenciais estiverem corretas - não é um modo de simulação."""
+    usuario = _exigir_cota_geracao(request)
+    resultado = social_pipeline.executar_ciclo(usuario, _decisoes_candidatas_social(25), forcar=True)
+    auth.registrar_geracao(usuario)
+    return resultado
+
+
+@app.get("/social/imagem/{nome}")
+def social_obter_imagem(nome: str):
+    """Serve as imagens geradas pro post automático - precisa ser público
+    (sem cookie de sessão) pra Graph API da Meta conseguir buscar a URL ao
+    publicar o carrossel. Ver _rota_publica acima."""
+    caminho = os.path.join(social_pipeline.PASTA_IMAGENS, nome)
+    if "/" in nome or ".." in nome or not os.path.isfile(caminho):
+        raise HTTPException(status_code=404, detail="Imagem não encontrada")
+    return FileResponse(caminho, media_type="image/png")
+
+
 # --- Prospecção B2B (índice de potencial de conteúdo + análise de público-alvo) --
 
 # Quantas candidatas (já ordenadas pelo índice determinístico, grátis)
@@ -1476,6 +1925,10 @@ def raiz():
             "/opportunities/{id}/carrossel-instagram", "/news/{id}/carrossel-instagram",
             "/opportunities/{id}/imagens-sugeridas", "/news/{id}/imagens-sugeridas",
             "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
-            "/auth/users",
+            "/auth/users", "/auth/invites", "/convites/{token}",
+            "/social/config", "/social/test-connection", "/social/posts", "/social/run-now",
+            "/social/logo", "/social/fundo", "/social/preview", "/social/gerar-identidade",
+            "/admin/coletar-decisoes-agora",
+            "/prospeccao/prioritarias", "/modelos-visuais",
         ],
     }
