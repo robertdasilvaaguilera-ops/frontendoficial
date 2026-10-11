@@ -10,16 +10,22 @@ resto do backend: direto e fácil de inspecionar (basta abrir com
 `sqlite3 database/atlas_app.db`).
 """
 import json
+import os
 import sqlite3
 import time
 import uuid
 
-import paths
-
-CAMINHO_DB = paths.caminho("database", "atlas_app.db")
+PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
+# ATLAS_DATA_DIR aponta o SQLite pra fora da pasta do código - em produção
+# (Railway) é o mount de um volume persistente, pra login/clientes/cota
+# sobreviverem a um redeploy. Sem essa variável (uso local, dentro do
+# zip), continua gravando em backend/database/ como sempre foi.
+_PASTA_DADOS = os.getenv("ATLAS_DATA_DIR") or os.path.join(PASTA_BASE, "database")
+CAMINHO_DB = os.path.join(_PASTA_DADOS, "atlas_app.db")
 
 
 def _conectar():
+    os.makedirs(os.path.dirname(CAMINHO_DB), exist_ok=True)
     conn = sqlite3.connect(CAMINHO_DB)
     conn.row_factory = sqlite3.Row
     return conn
@@ -30,7 +36,6 @@ def iniciar():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             id TEXT PRIMARY KEY,
-            usuario TEXT NOT NULL DEFAULT '',
             nome TEXT NOT NULL,
             cnpj TEXT,
             regime TEXT,
@@ -55,7 +60,6 @@ def iniciar():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS conversas (
             id TEXT PRIMARY KEY,
-            usuario TEXT NOT NULL DEFAULT '',
             titulo TEXT,
             mensagens TEXT NOT NULL,
             criado_em TEXT,
@@ -88,14 +92,51 @@ def iniciar():
             expira_em TEXT
         )
     """)
-    # Trava de força bruta no login (ver auth.py: registrar_falha_login /
-    # bloqueado_ate) - por usuário tentado, não por IP (protege a conta
-    # mesmo contra tentativas vindas de vários IPs).
+    # Modelo de estilo visual salvo (fonte, tamanhos, cor, estilos de
+    # destaque) - pra não precisar reconfigurar tudo a cada post (ver
+    # InstagramWorkspace/estúdio visual). Compartilhado entre toda a
+    # equipe (mesma lógica de "clientes"), não é preferência pessoal de
+    # ninguém - é o estilo padrão do escritório.
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS tentativa_login (
-            usuario TEXT PRIMARY KEY,
-            falhas INTEGER NOT NULL DEFAULT 0,
-            bloqueado_ate TEXT
+        CREATE TABLE IF NOT EXISTS modelo_visual (
+            id TEXT PRIMARY KEY,
+            nome TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            criado_por TEXT NOT NULL,
+            criado_em TEXT
+        )
+    """)
+    # Cache da análise de conteúdo B2B (ver ai/analise_conteudo.py e
+    # economics/indice_prospeccao.py) - calculada uma vez por decisão/
+    # notícia (chamada de IA tem custo), reaproveitada depois. "tipo"
+    # distingue "opportunities" de "news" porque os dois têm o mesmo
+    # formato de id (hash), então precisam de chave composta.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS analise_conteudo (
+            id TEXT NOT NULL,
+            tipo TEXT NOT NULL,
+            indice_json TEXT NOT NULL,
+            analise_json TEXT NOT NULL,
+            calculado_em TEXT,
+            PRIMARY KEY (id, tipo)
+        )
+    """)
+    # Convite de acesso - o dono nunca escolhe usuário/senha de ninguém (ver
+    # auth.py): gera um link de uso único com o nível já embutido, manda pra
+    # pessoa por fora da plataforma, e é ela quem escolhe o próprio login ao
+    # abrir o link. "rotulo" é só uma anotação livre do dono pra lembrar pra
+    # quem mandou cada convite (ex: "João - jurídico") - nunca é usuário nem
+    # senha de ninguém.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS convite (
+            token TEXT PRIMARY KEY,
+            nivel TEXT NOT NULL,
+            rotulo TEXT,
+            criado_por TEXT NOT NULL,
+            criado_em TEXT,
+            expira_em TEXT,
+            usado_em TEXT,
+            usuario_criado TEXT
         )
     """)
     # Cota semanal combinada de pareceres + posts gerados (reseta por
@@ -118,83 +159,20 @@ def iniciar():
             PRIMARY KEY (usuario, dia)
         )
     """)
-    # Mídia Social - automação de posts de Instagram (ver social/*.py e as
-    # rotas /social/* em api_server.py). Cada usuário tem a própria linha de
-    # config (próprio token do Instagram, própria identidade visual, próprios
-    # horários) - cada escritório automatiza o próprio perfil, isolado dos
-    # demais logins; decisões usadas evita repetir a mesma decisão em posts
-    # futuros de um mesmo usuário; posts é o histórico (sucesso ou erro)
-    # mostrado na aba Mídia Social, também por usuário.
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS social_config (
-            usuario TEXT PRIMARY KEY,
-            ativo INTEGER NOT NULL DEFAULT 0,
-            temas TEXT NOT NULL DEFAULT '[]',
-            objetivos TEXT NOT NULL DEFAULT '',
-            tom TEXT NOT NULL DEFAULT '',
-            horarios TEXT NOT NULL DEFAULT '[]',
-            ig_access_token TEXT NOT NULL DEFAULT '',
-            ig_business_account_id TEXT NOT NULL DEFAULT '',
-            marca_nome TEXT NOT NULL DEFAULT 'ATLAS',
-            marca_handle TEXT NOT NULL DEFAULT '@atlas.tributos',
-            cor_fundo_claro TEXT NOT NULL DEFAULT '#171B24',
-            cor_fundo_escuro TEXT NOT NULL DEFAULT '#0B0D12',
-            cor_destaque TEXT NOT NULL DEFAULT '#D9A544',
-            logo_path TEXT NOT NULL DEFAULT '',
-            estilo TEXT NOT NULL DEFAULT 'classico',
-            texto_claro INTEGER NOT NULL DEFAULT 1,
-            fundo1_path TEXT NOT NULL DEFAULT '',
-            fundo2_path TEXT NOT NULL DEFAULT '',
-            posicao_vertical TEXT NOT NULL DEFAULT 'centro',
-            alinhamento TEXT NOT NULL DEFAULT 'centro',
-            atualizado_em TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS social_decisoes_usadas (
-            usuario TEXT NOT NULL,
-            decisao_id TEXT NOT NULL,
-            usado_em TEXT,
-            PRIMARY KEY (usuario, decisao_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS social_posts (
-            id TEXT PRIMARY KEY,
-            usuario TEXT NOT NULL DEFAULT '',
-            criado_em TEXT,
-            decisao_id TEXT,
-            titulo TEXT,
-            paragrafo_destaque TEXT,
-            headline2 TEXT,
-            sub2 TEXT,
-            legenda TEXT,
-            gancho TEXT,
-            imagem1_path TEXT,
-            imagem2_path TEXT,
-            status TEXT NOT NULL,
-            post_id TEXT,
-            permalink TEXT,
-            erro_detalhe TEXT
-        )
-    """)
     conn.commit()
     _migrar_credenciais_legado(conn)
     _migrar_credencial_termos(conn)
-    _migrar_social_config_marca(conn)
-    _migrar_clientes_dono(conn)
-    _migrar_conversas_dono(conn)
-    _migrar_social_config_multiusuario(conn)
-    _migrar_social_decisoes_usadas_dono(conn)
-    _migrar_social_posts_dono(conn)
-    # Índices só depois das migrações acima - em bancos legados, a coluna
-    # `usuario` só passa a existir depois que elas rodam (bancos novos já
-    # nascem com a coluna, então isso é um no-op nesse caso).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_usuario ON clientes(usuario)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversas_usuario ON conversas(usuario)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_social_posts_usuario ON social_posts(usuario)")
-    conn.commit()
     conn.close()
+
+
+def _migrar_credencial_termos(conn: sqlite3.Connection) -> None:
+    """Bancos de antes do cadastro aberto existir não têm a coluna de
+    aceite dos Termos de Uso/Política de Privacidade - só passa a existir
+    daqui pra frente, pra quem se cadastrar sozinho (ver /auth/registro)."""
+    colunas = {l[1] for l in conn.execute("PRAGMA table_info(credencial)")}
+    if "termos_aceitos_em" not in colunas:
+        conn.execute("ALTER TABLE credencial ADD COLUMN termos_aceitos_em TEXT")
+        conn.commit()
 
 
 def _migrar_credenciais_legado(conn: sqlite3.Connection) -> None:
@@ -240,213 +218,31 @@ def _migrar_credenciais_legado(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _migrar_credencial_termos(conn: sqlite3.Connection) -> None:
-    """Bancos de antes do cadastro aberto existir não têm a coluna de
-    aceite dos Termos de Uso/Política de Privacidade - só passa a existir
-    daqui pra frente, pra quem se cadastrar sozinho (ver /auth/registro)."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(credencial)")}
-    if "termos_aceitos_em" not in colunas:
-        conn.execute("ALTER TABLE credencial ADD COLUMN termos_aceitos_em TEXT")
-        conn.commit()
-
-
-def _migrar_social_config_marca(conn: sqlite3.Connection) -> None:
-    """Bancos criados antes da identidade de marca (nome/handle/cores/logo/
-    fonte/fundo) ficarem configuráveis não têm essas colunas - adiciona com
-    os mesmos defaults do CREATE TABLE acima (a identidade original da
-    Atlas), pra quem já tinha configuração salva continuar publicando
-    exatamente igual."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_config)")}
-    novas_texto = {
-        "marca_nome": "'ATLAS'",
-        "marca_handle": "'@atlas.tributos'",
-        "cor_fundo_claro": "'#171B24'",
-        "cor_fundo_escuro": "'#0B0D12'",
-        "cor_destaque": "'#D9A544'",
-        "logo_path": "''",
-        "estilo": "'classico'",
-        "fundo1_path": "''",
-        "fundo2_path": "''",
-        "posicao_vertical": "'centro'",
-        "alinhamento": "'centro'",
-    }
-    # f-string aqui é seguro: coluna/default vêm só do dict fixo acima
-    # (nunca de entrada externa) - e nomes de coluna não dá pra parametrizar
-    # com "?" de qualquer forma (só valores), então não tem como escrever
-    # isso com placeholder mesmo se quisesse.
-    for coluna, default in novas_texto.items():
-        if coluna not in colunas:
-            conn.execute(f"ALTER TABLE social_config ADD COLUMN {coluna} TEXT NOT NULL DEFAULT {default}")
-    if "texto_claro" not in colunas:
-        conn.execute("ALTER TABLE social_config ADD COLUMN texto_claro INTEGER NOT NULL DEFAULT 1")
-    conn.commit()
-
-
-def _usuario_admin_legado(conn: sqlite3.Connection) -> str | None:
-    """Login que herda os dados de dono único de antes do multiusuário
-    (carteira de clientes, conversas do Copiloto, automação de Mídia Social)
-    - o primeiro admin, ou se nenhum existir ainda, o primeiro login
-    cadastrado. Usado só pelas migrações abaixo, uma vez cada."""
-    linha = conn.execute(
-        "SELECT usuario FROM credencial WHERE nivel = 'admin' ORDER BY criado_em ASC LIMIT 1"
-    ).fetchone()
-    if not linha:
-        linha = conn.execute("SELECT usuario FROM credencial ORDER BY criado_em ASC LIMIT 1").fetchone()
-    return linha["usuario"] if linha else None
-
-
-def _migrar_clientes_dono(conn: sqlite3.Connection) -> None:
-    """Bancos de antes do multiusuário não tinham dono na carteira de
-    clientes (todo mundo via tudo) - atribui os clientes já cadastrados ao
-    login legado (ver _usuario_admin_legado), pra continuar exatamente onde
-    estava em vez de "perder" a carteira."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(clientes)")}
-    if "usuario" in colunas:
-        return
-    conn.execute("ALTER TABLE clientes ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
-    dono = _usuario_admin_legado(conn)
-    if dono:
-        conn.execute("UPDATE clientes SET usuario = ? WHERE usuario = ''", (dono,))
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_usuario ON clientes(usuario)")
-    conn.commit()
-
-
-def _migrar_conversas_dono(conn: sqlite3.Connection) -> None:
-    """Mesma lógica de _migrar_clientes_dono, pro histórico do Copiloto -
-    cada conversa passa a pertencer a quem a criou; as já existentes (de
-    antes de existir dono) vão para o login legado."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(conversas)")}
-    if "usuario" in colunas:
-        return
-    conn.execute("ALTER TABLE conversas ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
-    dono = _usuario_admin_legado(conn)
-    if dono:
-        conn.execute("UPDATE conversas SET usuario = ? WHERE usuario = ''", (dono,))
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversas_usuario ON conversas(usuario)")
-    conn.commit()
-
-
-def _migrar_social_config_multiusuario(conn: sqlite3.Connection) -> None:
-    """Versões anteriores tinham uma única configuração de Mídia Social
-    (id=1) compartilhada por toda a equipe - cada login precisa da própria
-    (próprio token do Instagram, própria identidade visual, próprios
-    horários), então a linha única vira uma linha por usuário (chave
-    primária `usuario`). A config antiga, se existir, vira a config do login
-    legado, pra quem já estava automatizado continuar publicando exatamente
-    como antes."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_config)")}
-    if "usuario" in colunas:
-        return
-    conn.execute("ALTER TABLE social_config RENAME TO social_config_legado")
-    conn.execute("""
-        CREATE TABLE social_config (
-            usuario TEXT PRIMARY KEY,
-            ativo INTEGER NOT NULL DEFAULT 0,
-            temas TEXT NOT NULL DEFAULT '[]',
-            objetivos TEXT NOT NULL DEFAULT '',
-            tom TEXT NOT NULL DEFAULT '',
-            horarios TEXT NOT NULL DEFAULT '[]',
-            ig_access_token TEXT NOT NULL DEFAULT '',
-            ig_business_account_id TEXT NOT NULL DEFAULT '',
-            marca_nome TEXT NOT NULL DEFAULT 'ATLAS',
-            marca_handle TEXT NOT NULL DEFAULT '@atlas.tributos',
-            cor_fundo_claro TEXT NOT NULL DEFAULT '#171B24',
-            cor_fundo_escuro TEXT NOT NULL DEFAULT '#0B0D12',
-            cor_destaque TEXT NOT NULL DEFAULT '#D9A544',
-            logo_path TEXT NOT NULL DEFAULT '',
-            estilo TEXT NOT NULL DEFAULT 'classico',
-            texto_claro INTEGER NOT NULL DEFAULT 1,
-            fundo1_path TEXT NOT NULL DEFAULT '',
-            fundo2_path TEXT NOT NULL DEFAULT '',
-            posicao_vertical TEXT NOT NULL DEFAULT 'centro',
-            alinhamento TEXT NOT NULL DEFAULT 'centro',
-            atualizado_em TEXT
-        )
-    """)
-    dono = _usuario_admin_legado(conn)
-    linha_legado = conn.execute("SELECT * FROM social_config_legado WHERE id = 1").fetchone()
-    if linha_legado and dono:
-        # Nomes de coluna vêm só do próprio schema legado (nunca de entrada
-        # externa) - "id" é a única que não existe na tabela nova.
-        campos = [c for c in linha_legado.keys() if c != "id"]
-        placeholders = ", ".join("?" for _ in campos)
-        conn.execute(
-            f"INSERT INTO social_config (usuario, {', '.join(campos)}) VALUES (?, {placeholders})",
-            (dono, *[linha_legado[c] for c in campos]),
-        )
-    conn.execute("DROP TABLE social_config_legado")
-    conn.commit()
-
-
-def _migrar_social_decisoes_usadas_dono(conn: sqlite3.Connection) -> None:
-    """Idem social_config: decisão usada passa a ser por usuário (cada
-    automação evita repetir só as próprias decisões já publicadas, não as de
-    outros logins) - histórico existente vai para o login legado."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_decisoes_usadas)")}
-    if "usuario" in colunas:
-        return
-    conn.execute("ALTER TABLE social_decisoes_usadas RENAME TO social_decisoes_usadas_legado")
-    conn.execute("""
-        CREATE TABLE social_decisoes_usadas (
-            usuario TEXT NOT NULL,
-            decisao_id TEXT NOT NULL,
-            usado_em TEXT,
-            PRIMARY KEY (usuario, decisao_id)
-        )
-    """)
-    dono = _usuario_admin_legado(conn)
-    if dono:
-        conn.execute(
-            "INSERT INTO social_decisoes_usadas (usuario, decisao_id, usado_em) "
-            "SELECT ?, decisao_id, usado_em FROM social_decisoes_usadas_legado",
-            (dono,),
-        )
-    conn.execute("DROP TABLE social_decisoes_usadas_legado")
-    conn.commit()
-
-
-def _migrar_social_posts_dono(conn: sqlite3.Connection) -> None:
-    """Idem clientes/conversas: histórico de posts existente vai para o
-    login legado; novos posts já nascem com o usuário que os gerou."""
-    colunas = {l[1] for l in conn.execute("PRAGMA table_info(social_posts)")}
-    if "usuario" in colunas:
-        return
-    conn.execute("ALTER TABLE social_posts ADD COLUMN usuario TEXT NOT NULL DEFAULT ''")
-    dono = _usuario_admin_legado(conn)
-    if dono:
-        conn.execute("UPDATE social_posts SET usuario = ? WHERE usuario = ''", (dono,))
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_social_posts_usuario ON social_posts(usuario)")
-    conn.commit()
-
-
 # --- clientes ---------------------------------------------------------
 
-def listar_clientes(usuario: str) -> list[dict]:
+def listar_clientes() -> list[dict]:
     conn = _conectar()
-    linhas = conn.execute(
-        "SELECT * FROM clientes WHERE usuario = ? ORDER BY criado_em DESC", (usuario,)
-    ).fetchall()
+    linhas = conn.execute("SELECT * FROM clientes ORDER BY criado_em DESC").fetchall()
     conn.close()
     return [_linha_cliente_para_dict(l) for l in linhas]
 
 
-def inserir_cliente(dados: dict, usuario: str) -> dict:
+def inserir_cliente(dados: dict) -> dict:
     id_ = uuid.uuid4().hex[:12]
     criado_em = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
     conn.execute(
         """
         INSERT INTO clientes (
-            id, usuario, nome, cnpj, regime, setor, cnae, uf, cidade,
+            id, nome, cnpj, regime, setor, cnae, uf, cidade,
             tributos_relevantes, faturamento_anual, grupo_economico,
             comercio_exterior, folha_relevante, ufs_atuacao,
             contencioso_ativo, contencioso_descricao, tese_interesse,
             prioridade, observacoes, criado_em
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             id_,
-            usuario,
             dados.get("nome", ""),
             dados.get("cnpj", ""),
             dados.get("regime", ""),
@@ -470,29 +266,27 @@ def inserir_cliente(dados: dict, usuario: str) -> dict:
     )
     conn.commit()
     conn.close()
-    return listar_cliente_por_id(id_, usuario)
+    return listar_cliente_por_id(id_)
 
 
-def listar_cliente_por_id(id_: str, usuario: str) -> dict | None:
+def listar_cliente_por_id(id_: str) -> dict | None:
     conn = _conectar()
-    linha = conn.execute(
-        "SELECT * FROM clientes WHERE id = ? AND usuario = ?", (id_, usuario)
-    ).fetchone()
+    linha = conn.execute("SELECT * FROM clientes WHERE id = ?", (id_,)).fetchone()
     conn.close()
     return _linha_cliente_para_dict(linha) if linha else None
 
 
-def remover_cliente(id_: str, usuario: str) -> bool:
+def remover_cliente(id_: str) -> bool:
     conn = _conectar()
-    cur = conn.execute("DELETE FROM clientes WHERE id = ? AND usuario = ?", (id_, usuario))
+    cur = conn.execute("DELETE FROM clientes WHERE id = ?", (id_,))
     conn.commit()
     conn.close()
     return cur.rowcount > 0
 
 
-def contar_clientes(usuario: str) -> int:
+def contar_clientes() -> int:
     conn = _conectar()
-    n = conn.execute("SELECT COUNT(*) FROM clientes WHERE usuario = ?", (usuario,)).fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM clientes").fetchone()[0]
     conn.close()
     return int(n)
 
@@ -523,12 +317,10 @@ def _linha_cliente_para_dict(linha: sqlite3.Row) -> dict:
 
 # --- conversas do Copiloto ---------------------------------------------
 
-def listar_conversas(usuario: str) -> list[dict]:
+def listar_conversas() -> list[dict]:
     conn = _conectar()
     linhas = conn.execute(
-        "SELECT id, titulo, criado_em, atualizado_em FROM conversas "
-        "WHERE usuario = ? ORDER BY atualizado_em DESC",
-        (usuario,),
+        "SELECT id, titulo, criado_em, atualizado_em FROM conversas ORDER BY atualizado_em DESC"
     ).fetchall()
     conn.close()
     return [
@@ -542,11 +334,9 @@ def listar_conversas(usuario: str) -> list[dict]:
     ]
 
 
-def obter_conversa(id_: str, usuario: str) -> dict | None:
+def obter_conversa(id_: str) -> dict | None:
     conn = _conectar()
-    linha = conn.execute(
-        "SELECT * FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario)
-    ).fetchone()
+    linha = conn.execute("SELECT * FROM conversas WHERE id = ?", (id_,)).fetchone()
     conn.close()
     if not linha:
         return None
@@ -559,43 +349,31 @@ def obter_conversa(id_: str, usuario: str) -> dict | None:
     }
 
 
-def salvar_conversa(id_: str | None, titulo: str, mensagens: list[dict], usuario: str) -> dict:
-    """Cria a conversa se id_ for None/novo, ou atualiza se já existir (e for
-    do mesmo usuário) - o Copiloto salva a cada troca de mensagem, então é
-    sempre um upsert. Um id que não é deste usuário é tratado como novo
-    (nunca sobrescreve/anexa a conversa de outro login)."""
+def salvar_conversa(id_: str | None, titulo: str, mensagens: list[dict]) -> dict:
+    """Cria a conversa se id_ for None/novo, ou atualiza se já existir -
+    o Copiloto salva a cada troca de mensagem, então é sempre um upsert."""
     agora = time.strftime("%Y-%m-%dT%H:%M:%S")
     conn = _conectar()
-    existente = (
-        conn.execute(
-            "SELECT 1 FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario)
-        ).fetchone()
-        if id_
-        else None
-    )
-    if existente:
+    if id_ and conn.execute("SELECT 1 FROM conversas WHERE id = ?", (id_,)).fetchone():
         conn.execute(
             "UPDATE conversas SET titulo = ?, mensagens = ?, atualizado_em = ? WHERE id = ?",
             (titulo, json.dumps(mensagens, ensure_ascii=False), agora, id_),
         )
     else:
-        # id_ ausente, ou pertencente a outro usuário (nunca reaproveitado,
-        # pra não colidir com a PK de uma conversa que não é desta pessoa) -
-        # sempre nasce com um id novo.
-        id_ = uuid.uuid4().hex[:12]
+        id_ = id_ or uuid.uuid4().hex[:12]
         conn.execute(
-            "INSERT INTO conversas (id, usuario, titulo, mensagens, criado_em, atualizado_em) "
-            "VALUES (?,?,?,?,?,?)",
-            (id_, usuario, titulo, json.dumps(mensagens, ensure_ascii=False), agora, agora),
+            "INSERT INTO conversas (id, titulo, mensagens, criado_em, atualizado_em) "
+            "VALUES (?,?,?,?,?)",
+            (id_, titulo, json.dumps(mensagens, ensure_ascii=False), agora, agora),
         )
     conn.commit()
     conn.close()
-    return obter_conversa(id_, usuario)
+    return obter_conversa(id_)
 
 
-def remover_conversa(id_: str, usuario: str) -> bool:
+def remover_conversa(id_: str) -> bool:
     conn = _conectar()
-    cur = conn.execute("DELETE FROM conversas WHERE id = ? AND usuario = ?", (id_, usuario))
+    cur = conn.execute("DELETE FROM conversas WHERE id = ?", (id_,))
     conn.commit()
     conn.close()
     return cur.rowcount > 0
@@ -627,39 +405,6 @@ def obter_credencial(usuario: str) -> dict | None:
         "senhaSalt": linha["senha_salt"],
         "nivel": linha["nivel"],
     }
-
-
-# --- trava de força bruta no login (ver auth.py) -----------------------
-
-def obter_tentativa_login(usuario: str) -> dict:
-    conn = _conectar()
-    linha = conn.execute(
-        "SELECT * FROM tentativa_login WHERE usuario = ?", (usuario.strip(),)
-    ).fetchone()
-    conn.close()
-    if not linha:
-        return {"falhas": 0, "bloqueadoAte": None}
-    return {"falhas": linha["falhas"], "bloqueadoAte": linha["bloqueado_ate"]}
-
-
-def registrar_falha_login(usuario: str, falhas: int, bloqueado_ate: str | None) -> None:
-    conn = _conectar()
-    conn.execute(
-        """
-        INSERT INTO tentativa_login (usuario, falhas, bloqueado_ate) VALUES (?, ?, ?)
-        ON CONFLICT(usuario) DO UPDATE SET falhas = excluded.falhas, bloqueado_ate = excluded.bloqueado_ate
-        """,
-        (usuario.strip(), falhas, bloqueado_ate),
-    )
-    conn.commit()
-    conn.close()
-
-
-def limpar_tentativas_login(usuario: str) -> None:
-    conn = _conectar()
-    conn.execute("DELETE FROM tentativa_login WHERE usuario = ?", (usuario.strip(),))
-    conn.commit()
-    conn.close()
 
 
 def obter_nivel(usuario: str) -> str | None:
@@ -704,23 +449,166 @@ def registrar_aceite_termos(usuario: str) -> None:
 
 
 def remover_usuario(usuario: str) -> None:
-    """Remove o login e tudo que é exclusivamente dele - inclui a
-    automação de Mídia Social (social_config): sem isso, um usuário
-    removido continuaria automaticamente publicando no Instagram dele pra
-    sempre, já que o agendador (social/scheduler.py) não olha credencial,
-    só quem tem config ativa. Carteira de clientes e conversas do Copiloto
-    ficam guardadas (só ficam inacessíveis, ninguém mais loga como esse
-    usuário) - histórico do escritório, não um segredo de acesso como o
-    token do Instagram."""
-    usuario = usuario.strip()
     conn = _conectar()
-    conn.execute("DELETE FROM credencial WHERE usuario = ?", (usuario,))
-    conn.execute("DELETE FROM sessao WHERE usuario = ?", (usuario,))
-    conn.execute("DELETE FROM uso_semanal WHERE usuario = ?", (usuario,))
-    conn.execute("DELETE FROM uso_chat_diario WHERE usuario = ?", (usuario,))
-    conn.execute("DELETE FROM social_config WHERE usuario = ?", (usuario,))
+    conn.execute("DELETE FROM credencial WHERE usuario = ?", (usuario.strip(),))
+    conn.execute("DELETE FROM sessao WHERE usuario = ?", (usuario.strip(),))
+    conn.execute("DELETE FROM uso_semanal WHERE usuario = ?", (usuario.strip(),))
+    conn.execute("DELETE FROM uso_chat_diario WHERE usuario = ?", (usuario.strip(),))
     conn.commit()
     conn.close()
+
+
+# --- convites de acesso ---------------------------------------------------
+
+def criar_convite(token: str, nivel: str, rotulo: str, criado_por: str, expira_em: str) -> None:
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        "INSERT INTO convite (token, nivel, rotulo, criado_por, criado_em, expira_em) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (token, nivel, rotulo or None, criado_por, agora, expira_em),
+    )
+    conn.commit()
+    conn.close()
+
+
+def listar_convites() -> list[dict]:
+    conn = _conectar()
+    linhas = conn.execute("SELECT * FROM convite ORDER BY criado_em DESC").fetchall()
+    conn.close()
+    return [_linha_convite_para_dict(l) for l in linhas]
+
+
+def obter_convite(token: str) -> dict | None:
+    conn = _conectar()
+    linha = conn.execute("SELECT * FROM convite WHERE token = ?", (token,)).fetchone()
+    conn.close()
+    return _linha_convite_para_dict(linha) if linha else None
+
+
+def marcar_convite_usado(token: str, usuario: str) -> None:
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        "UPDATE convite SET usado_em = ?, usuario_criado = ? WHERE token = ?",
+        (agora, usuario, token),
+    )
+    conn.commit()
+    conn.close()
+
+
+def remover_convite(token: str) -> bool:
+    conn = _conectar()
+    cur = conn.execute("DELETE FROM convite WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def _linha_convite_para_dict(linha: sqlite3.Row) -> dict:
+    return {
+        "token": linha["token"],
+        "nivel": linha["nivel"],
+        "rotulo": linha["rotulo"],
+        "criadoPor": linha["criado_por"],
+        "criadoEm": linha["criado_em"],
+        "expiraEm": linha["expira_em"],
+        "usadoEm": linha["usado_em"],
+        "usuarioCriado": linha["usuario_criado"],
+    }
+
+
+# --- cache de análise de conteúdo B2B -------------------------------------
+
+def obter_analise_conteudo(id_: str, tipo: str) -> dict | None:
+    conn = _conectar()
+    linha = conn.execute(
+        "SELECT * FROM analise_conteudo WHERE id = ? AND tipo = ?", (id_, tipo)
+    ).fetchone()
+    conn.close()
+    if not linha:
+        return None
+    return {
+        "indice": json.loads(linha["indice_json"]),
+        "analise": json.loads(linha["analise_json"]),
+        "calculadoEm": linha["calculado_em"],
+    }
+
+
+def salvar_analise_conteudo(id_: str, tipo: str, indice: dict, analise: dict) -> None:
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        """
+        INSERT INTO analise_conteudo (id, tipo, indice_json, analise_json, calculado_em)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id, tipo) DO UPDATE SET
+            indice_json = excluded.indice_json,
+            analise_json = excluded.analise_json,
+            calculado_em = excluded.calculado_em
+        """,
+        (id_, tipo, json.dumps(indice, ensure_ascii=False), json.dumps(analise, ensure_ascii=False), agora),
+    )
+    conn.commit()
+    conn.close()
+
+
+def listar_analises_conteudo(tipo: str) -> dict[str, dict]:
+    """{id: {"indice":..., "analise":..., "calculadoEm":...}} de tudo que já
+    foi calculado pra esse tipo - usado pra saber, sem recalcular, quais
+    itens da shortlist do dia já têm análise pronta."""
+    conn = _conectar()
+    linhas = conn.execute(
+        "SELECT * FROM analise_conteudo WHERE tipo = ?", (tipo,)
+    ).fetchall()
+    conn.close()
+    return {
+        l["id"]: {
+            "indice": json.loads(l["indice_json"]),
+            "analise": json.loads(l["analise_json"]),
+            "calculadoEm": l["calculado_em"],
+        }
+        for l in linhas
+    }
+
+
+# --- modelo de estilo visual salvo ----------------------------------------
+
+def criar_modelo_visual(nome: str, config: dict, criado_por: str) -> dict:
+    id_ = uuid.uuid4().hex[:12]
+    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
+    conn = _conectar()
+    conn.execute(
+        "INSERT INTO modelo_visual (id, nome, config_json, criado_por, criado_em) VALUES (?, ?, ?, ?, ?)",
+        (id_, nome, json.dumps(config, ensure_ascii=False), criado_por, agora),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": id_, "nome": nome, "config": config, "criadoPor": criado_por, "criadoEm": agora}
+
+
+def listar_modelos_visuais() -> list[dict]:
+    conn = _conectar()
+    linhas = conn.execute("SELECT * FROM modelo_visual ORDER BY criado_em DESC").fetchall()
+    conn.close()
+    return [
+        {
+            "id": l["id"],
+            "nome": l["nome"],
+            "config": json.loads(l["config_json"]),
+            "criadoPor": l["criado_por"],
+            "criadoEm": l["criado_em"],
+        }
+        for l in linhas
+    ]
+
+
+def remover_modelo_visual(id_: str) -> bool:
+    conn = _conectar()
+    cur = conn.execute("DELETE FROM modelo_visual WHERE id = ?", (id_,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
 
 
 # --- cota de uso (pareceres/posts por semana, chat por dia) --------------
@@ -823,221 +711,3 @@ def limpar_sessoes_expiradas() -> None:
     conn.execute("DELETE FROM sessao WHERE expira_em <= ?", (agora,))
     conn.commit()
     conn.close()
-
-
-# --- Mídia Social (automação de posts de Instagram) -----------------------
-
-_SOCIAL_CONFIG_PADRAO = {
-    "ativo": False,
-    "temas": [],
-    "objetivos": "",
-    "tom": "",
-    "horarios": [],
-    "igAccessToken": "",
-    "igBusinessAccountId": "",
-    "marcaNome": "ATLAS",
-    "marcaHandle": "@atlas.tributos",
-    "corFundoClaro": "#171B24",
-    "corFundoEscuro": "#0B0D12",
-    "corDestaque": "#D9A544",
-    "logoPath": "",
-    "estilo": "classico",
-    "textoClaro": True,
-    "fundo1Path": "",
-    "fundo2Path": "",
-    "posicaoVertical": "centro",
-    "alinhamento": "centro",
-}
-
-
-def obter_social_config(usuario: str) -> dict:
-    conn = _conectar()
-    linha = conn.execute("SELECT * FROM social_config WHERE usuario = ?", (usuario,)).fetchone()
-    conn.close()
-    if not linha:
-        return dict(_SOCIAL_CONFIG_PADRAO)
-    return {
-        "ativo": bool(linha["ativo"]),
-        "temas": json.loads(linha["temas"] or "[]"),
-        "objetivos": linha["objetivos"] or "",
-        "tom": linha["tom"] or "",
-        "horarios": json.loads(linha["horarios"] or "[]"),
-        "igAccessToken": linha["ig_access_token"] or "",
-        "igBusinessAccountId": linha["ig_business_account_id"] or "",
-        "marcaNome": linha["marca_nome"] or "ATLAS",
-        "marcaHandle": linha["marca_handle"] or "@atlas.tributos",
-        "corFundoClaro": linha["cor_fundo_claro"] or "#171B24",
-        "corFundoEscuro": linha["cor_fundo_escuro"] or "#0B0D12",
-        "corDestaque": linha["cor_destaque"] or "#D9A544",
-        "logoPath": linha["logo_path"] or "",
-        "estilo": linha["estilo"] or "classico",
-        "textoClaro": bool(linha["texto_claro"]),
-        "fundo1Path": linha["fundo1_path"] or "",
-        "fundo2Path": linha["fundo2_path"] or "",
-        "posicaoVertical": linha["posicao_vertical"] or "centro",
-        "alinhamento": linha["alinhamento"] or "centro",
-    }
-
-
-def salvar_social_config(usuario: str, dados: dict) -> dict:
-    """Upsert da configuração deste usuário. Campos ausentes em `dados`
-    mantêm o valor já salvo (permite, por ex., atualizar só os horários sem
-    reenviar o token do Instagram)."""
-    atual = obter_social_config(usuario)
-    mesclado = {**atual, **{k: v for k, v in dados.items() if v is not None}}
-    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
-    conn = _conectar()
-    conn.execute(
-        """
-        INSERT INTO social_config
-            (usuario, ativo, temas, objetivos, tom, horarios, ig_access_token, ig_business_account_id,
-             marca_nome, marca_handle, cor_fundo_claro, cor_fundo_escuro, cor_destaque, logo_path,
-             estilo, texto_claro, fundo1_path, fundo2_path, posicao_vertical, alinhamento, atualizado_em)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(usuario) DO UPDATE SET
-            ativo = excluded.ativo, temas = excluded.temas, objetivos = excluded.objetivos,
-            tom = excluded.tom, horarios = excluded.horarios,
-            ig_access_token = excluded.ig_access_token,
-            ig_business_account_id = excluded.ig_business_account_id,
-            marca_nome = excluded.marca_nome, marca_handle = excluded.marca_handle,
-            cor_fundo_claro = excluded.cor_fundo_claro, cor_fundo_escuro = excluded.cor_fundo_escuro,
-            cor_destaque = excluded.cor_destaque, logo_path = excluded.logo_path,
-            estilo = excluded.estilo, texto_claro = excluded.texto_claro,
-            fundo1_path = excluded.fundo1_path, fundo2_path = excluded.fundo2_path,
-            posicao_vertical = excluded.posicao_vertical, alinhamento = excluded.alinhamento,
-            atualizado_em = excluded.atualizado_em
-        """,
-        (
-            usuario,
-            int(bool(mesclado["ativo"])),
-            json.dumps(mesclado["temas"], ensure_ascii=False),
-            mesclado["objetivos"],
-            mesclado["tom"],
-            json.dumps(mesclado["horarios"], ensure_ascii=False),
-            mesclado["igAccessToken"],
-            mesclado["igBusinessAccountId"],
-            mesclado["marcaNome"],
-            mesclado["marcaHandle"],
-            mesclado["corFundoClaro"],
-            mesclado["corFundoEscuro"],
-            mesclado["corDestaque"],
-            mesclado["logoPath"],
-            mesclado["estilo"],
-            int(bool(mesclado["textoClaro"])),
-            mesclado["fundo1Path"],
-            mesclado["fundo2Path"],
-            mesclado["posicaoVertical"],
-            mesclado["alinhamento"],
-            agora,
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return obter_social_config(usuario)
-
-
-def listar_usuarios_social_ativos() -> list[str]:
-    """Todo usuário com a automação ligada (`ativo`) e pelo menos um
-    horário configurado - usado pelo agendador pra saber pra quem montar
-    jobs (ver social/scheduler.py: um job por usuário/horário, não um job
-    global só)."""
-    conn = _conectar()
-    linhas = conn.execute(
-        "SELECT usuario FROM social_config WHERE ativo = 1 AND horarios != '[]'"
-    ).fetchall()
-    conn.close()
-    return [l["usuario"] for l in linhas]
-
-
-def listar_social_decisoes_usadas(usuario: str) -> set[str]:
-    conn = _conectar()
-    linhas = conn.execute(
-        "SELECT decisao_id FROM social_decisoes_usadas WHERE usuario = ?", (usuario,)
-    ).fetchall()
-    conn.close()
-    return {l["decisao_id"] for l in linhas}
-
-
-def marcar_social_decisao_usada(usuario: str, decisao_id: str) -> None:
-    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
-    conn = _conectar()
-    conn.execute(
-        "INSERT OR IGNORE INTO social_decisoes_usadas (usuario, decisao_id, usado_em) VALUES (?, ?, ?)",
-        (usuario, decisao_id, agora),
-    )
-    conn.commit()
-    conn.close()
-
-
-def inserir_social_post(usuario: str, dados: dict) -> dict:
-    id_ = uuid.uuid4().hex[:12]
-    agora = time.strftime("%Y-%m-%dT%H:%M:%S")
-    conn = _conectar()
-    conn.execute(
-        """
-        INSERT INTO social_posts (
-            id, usuario, criado_em, decisao_id, titulo, paragrafo_destaque, headline2, sub2,
-            legenda, gancho, imagem1_path, imagem2_path, status, post_id, permalink, erro_detalhe
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            id_, usuario, agora,
-            dados.get("decisaoId"), dados.get("titulo", ""),
-            dados.get("paragrafoDestaque", ""), dados.get("headline2", ""), dados.get("sub2", ""),
-            dados.get("legenda", ""), dados.get("gancho", ""),
-            dados.get("imagem1Path"), dados.get("imagem2Path"),
-            dados.get("status", "erro"), dados.get("postId"), dados.get("permalink"),
-            dados.get("erroDetalhe"),
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return obter_social_post(id_)
-
-
-def obter_social_post(id_: str) -> dict | None:
-    conn = _conectar()
-    linha = conn.execute("SELECT * FROM social_posts WHERE id = ?", (id_,)).fetchone()
-    conn.close()
-    return _linha_social_post_para_dict(linha) if linha else None
-
-
-def listar_social_posts(usuario: str, limit: int = 30) -> list[dict]:
-    conn = _conectar()
-    linhas = conn.execute(
-        "SELECT * FROM social_posts WHERE usuario = ? ORDER BY criado_em DESC LIMIT ?",
-        (usuario, limit),
-    ).fetchall()
-    conn.close()
-    return [_linha_social_post_para_dict(l) for l in linhas]
-
-
-def ultimos_ganchos_social(usuario: str, n: int = 5) -> list[str]:
-    conn = _conectar()
-    linhas = conn.execute(
-        "SELECT gancho FROM social_posts WHERE usuario = ? AND status = 'publicado' AND gancho != '' "
-        "ORDER BY criado_em DESC LIMIT ?",
-        (usuario, n),
-    ).fetchall()
-    conn.close()
-    return [l["gancho"] for l in linhas]
-
-
-def _linha_social_post_para_dict(linha: sqlite3.Row) -> dict:
-    return {
-        "id": linha["id"],
-        "criadoEm": linha["criado_em"],
-        "decisaoId": linha["decisao_id"],
-        "titulo": linha["titulo"] or "",
-        "paragrafoDestaque": linha["paragrafo_destaque"] or "",
-        "headline2": linha["headline2"] or "",
-        "sub2": linha["sub2"] or "",
-        "legenda": linha["legenda"] or "",
-        "gancho": linha["gancho"] or "",
-        "imagem1Path": linha["imagem1_path"],
-        "imagem2Path": linha["imagem2_path"],
-        "status": linha["status"],
-        "postId": linha["post_id"],
-        "permalink": linha["permalink"],
-        "erroDetalhe": linha["erro_detalhe"],
-    }
