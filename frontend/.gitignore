@@ -20,8 +20,8 @@ dist-ssr
 .wrangler/
 .dev.vars
 
-# Config local de ambiente (URL da API etc.) - cada máquina/ambiente tem a sua
-.env
+# Build output da Vercel (gerado por `vite build` com nitro preset "vercel")
+.vercel/
 
 # Editor directories and files
 .vscode/*
@@ -33,3 +33,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.vercel
+.env*

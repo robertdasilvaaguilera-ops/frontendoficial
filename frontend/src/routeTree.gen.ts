@@ -16,7 +16,9 @@ import { Route as EstudioVisualRouteImport } from './routes/estudio-visual'
 import { Route as ListaRouteImport } from './routes/lista'
 import { Route as MidiaSocialRouteImport } from './routes/midia-social'
 import { Route as NoticiasRouteImport } from './routes/noticias'
+import { Route as ProspeccaoRouteImport } from './routes/prospeccao'
 import { Route as UsuariosRouteImport } from './routes/usuarios'
+import { Route as ConviteTokenRouteImport } from './routes/convite.$token'
 import { Route as OportunidadesIdRouteImport } from './routes/oportunidades.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -54,9 +56,19 @@ const NoticiasRoute = NoticiasRouteImport.update({
   path: '/noticias',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProspeccaoRoute = ProspeccaoRouteImport.update({
+  id: '/prospeccao',
+  path: '/prospeccao',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const UsuariosRoute = UsuariosRouteImport.update({
   id: '/usuarios',
   path: '/usuarios',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConviteTokenRoute = ConviteTokenRouteImport.update({
+  id: '/convite/$token',
+  path: '/convite/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OportunidadesIdRoute = OportunidadesIdRouteImport.update({
@@ -73,7 +85,9 @@ export interface FileRoutesByFullPath {
   '/lista': typeof ListaRoute
   '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
+  '/prospeccao': typeof ProspeccaoRoute
   '/usuarios': typeof UsuariosRoute
+  '/convite/$token': typeof ConviteTokenRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
 }
 export interface FileRoutesByTo {
@@ -84,7 +98,9 @@ export interface FileRoutesByTo {
   '/lista': typeof ListaRoute
   '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
+  '/prospeccao': typeof ProspeccaoRoute
   '/usuarios': typeof UsuariosRoute
+  '/convite/$token': typeof ConviteTokenRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
 }
 export interface FileRoutesById {
@@ -96,7 +112,9 @@ export interface FileRoutesById {
   '/lista': typeof ListaRoute
   '/midia-social': typeof MidiaSocialRoute
   '/noticias': typeof NoticiasRoute
+  '/prospeccao': typeof ProspeccaoRoute
   '/usuarios': typeof UsuariosRoute
+  '/convite/$token': typeof ConviteTokenRoute
   '/oportunidades/$id': typeof OportunidadesIdRoute
 }
 export interface FileRouteTypes {
@@ -109,7 +127,9 @@ export interface FileRouteTypes {
     | '/lista'
     | '/midia-social'
     | '/noticias'
+    | '/prospeccao'
     | '/usuarios'
+    | '/convite/$token'
     | '/oportunidades/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -120,7 +140,9 @@ export interface FileRouteTypes {
     | '/lista'
     | '/midia-social'
     | '/noticias'
+    | '/prospeccao'
     | '/usuarios'
+    | '/convite/$token'
     | '/oportunidades/$id'
   id:
     | '__root__'
@@ -131,7 +153,9 @@ export interface FileRouteTypes {
     | '/lista'
     | '/midia-social'
     | '/noticias'
+    | '/prospeccao'
     | '/usuarios'
+    | '/convite/$token'
     | '/oportunidades/$id'
   fileRoutesById: FileRoutesById
 }
@@ -143,7 +167,9 @@ export interface RootRouteChildren {
   ListaRoute: typeof ListaRoute
   MidiaSocialRoute: typeof MidiaSocialRoute
   NoticiasRoute: typeof NoticiasRoute
+  ProspeccaoRoute: typeof ProspeccaoRoute
   UsuariosRoute: typeof UsuariosRoute
+  ConviteTokenRoute: typeof ConviteTokenRoute
   OportunidadesIdRoute: typeof OportunidadesIdRoute
 }
 
@@ -198,11 +224,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NoticiasRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/prospeccao': {
+      id: '/prospeccao'
+      path: '/prospeccao'
+      fullPath: '/prospeccao'
+      preLoaderRoute: typeof ProspeccaoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/usuarios': {
       id: '/usuarios'
       path: '/usuarios'
       fullPath: '/usuarios'
       preLoaderRoute: typeof UsuariosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/convite/$token': {
+      id: '/convite/$token'
+      path: '/convite/$token'
+      fullPath: '/convite/$token'
+      preLoaderRoute: typeof ConviteTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/oportunidades/$id': {
@@ -223,7 +263,9 @@ const rootRouteChildren: RootRouteChildren = {
   ListaRoute: ListaRoute,
   MidiaSocialRoute: MidiaSocialRoute,
   NoticiasRoute: NoticiasRoute,
+  ProspeccaoRoute: ProspeccaoRoute,
   UsuariosRoute: UsuariosRoute,
+  ConviteTokenRoute: ConviteTokenRoute,
   OportunidadesIdRoute: OportunidadesIdRoute,
 }
 export const routeTree = rootRouteImport

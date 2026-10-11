@@ -11,7 +11,7 @@ import {
   User,
   X,
 } from "lucide-react";
-import { gerarPostInstagram } from "@/lib/atlas-api";
+import { gerarPostInstagram, type ElementoVisualSlideResposta } from "@/lib/atlas-api";
 import {
   DEFAULT_BRAND_CONFIG,
   fileToDataUrl,
@@ -22,21 +22,57 @@ import {
   type BrandConfig,
 } from "@/lib/brand-config";
 import {
-  renderInstagramPost,
+  renderPostComModelo,
+  PERFIS_NOTICIAS,
   templatePadraoPara,
   TEMPLATES,
+  TAMANHOS_FONTE,
+  TAMANHO_FONTE_PADRAO,
   type TemplateId,
-  type FontScale,
-  type FontFamilyId,
+  type PapelTexto,
+  type ChaveArrasto,
+  type PosicoesTexto,
+  type AlinhamentoTexto,
+  removerFundoLogo,
 } from "@/lib/instagram-canvas";
+import { PosicionadorTexto } from "@/components/PosicionadorTexto";
+import { SeletorAlinhamento } from "@/components/SeletorAlinhamento";
+import { PalavrasColoridas } from "@/components/PalavrasColoridas";
+
+// A IA (ai/social_post.py) ainda sugere tamanho em "pequena"/"media"/
+// "grande" quando o advogado pede "letra maior" no chat - convertido pro
+// tamanho numérico equivalente aqui, sem precisar mudar o backend.
+const TAMANHO_LEGADO: Record<string, number> = { pequena: 6, media: 10, grande: 14 };
 
 const CANVAS_W = 1080;
 const CANVAS_H = 1350;
+
+// Só mostra alça de arrastar pra texto que a arte realmente tem - rótulo e
+// título sempre têm algo (kicker formatado, ou o próprio título do item),
+// corpo também sempre cai num fallback (resumoExecutivo do item), rodapé
+// sempre desenha nome do escritório (ou "Seu Escritório"). A logo só
+// entra quando o escritório tem uma configurada.
+function papeisAtivosDoPost(
+  corpo: string,
+  temLogo: boolean,
+  temElementoVisual: boolean,
+): ChaveArrasto[] {
+  const papeis: ChaveArrasto[] = ["rotulo", "titulo", "rodape"];
+  if (corpo.trim()) papeis.push("corpo");
+  if (temElementoVisual) papeis.push("grafico");
+  if (temLogo) papeis.push("logo");
+  return papeis;
+}
 
 interface PostText {
   headline: string;
   corpo: string;
   legenda: string;
+  elementoVisual?: ElementoVisualSlideResposta | null;
+  destaquesTitulo?: string[];
+  destaquesCorpo?: string[];
+  coresPalavrasTitulo?: Record<number, string>;
+  coresPalavrasCorpo?: Record<number, string>;
 }
 
 export interface PostableItem {
@@ -73,12 +109,27 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
   // Estilo visual da arte - varia por caso por padrão (não é sempre o mesmo
   // template pra todo mundo), e pode ser trocado na mão ou pelo chat
   // ("fundo azul", "letra maior", "mais moderno" etc - ver ai/social_post.py).
+  // Cada template é um perfil do Sistema de Design (ver
+  // instagram-canvas.ts::PERFIS_NOTICIAS) desenhado pelo mesmo motor do
+  // carrossel/Estúdio Visual (renderPostComModelo) - fase 5 do plano de
+  // arquitetura, motor legado aposentado.
   const [template, setTemplate] = useState<TemplateId>(() => templatePadraoPara(item.id));
   const [accentColor, setAccentColor] = useState<string>(
     () => getBrandConfig().corDestaque || DEFAULT_BRAND_CONFIG.corDestaque,
   );
-  const [fontScale, setFontScale] = useState<FontScale>("media");
-  const [fontFamily, setFontFamily] = useState<FontFamilyId>("sans");
+  const [fontScale, setFontScale] = useState<number>(TAMANHO_FONTE_PADRAO);
+  // Um por texto (não mais um único botão pro post inteiro) - null =
+  // segue o padrão do template escolhido pra esse texto.
+  const [alinhamentoRotulo, setAlinhamentoRotulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoTitulo, setAlinhamentoTitulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoCorpo, setAlinhamentoCorpo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoRodape, setAlinhamentoRodape] = useState<AlinhamentoTexto | null>(null);
+  // Posição livre - vazio = ninguém foi arrastado ainda, cada texto fica no
+  // lugar calculado pelo template escolhido (comportamento de sempre).
+  const [posicoesEscolhidas, setPosicoesEscolhidas] = useState<PosicoesTexto>({});
+  // Posição EFETIVA (arrastada ou padrão) devolvida pelo desenho do canvas -
+  // usada só pra saber onde colocar a alça de arrastar.
+  const [posicoesAtuais, setPosicoesAtuais] = useState<PosicoesTexto>({});
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -93,7 +144,8 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
   async function onLogoChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    updateBrand({ logoDataUrl: await fileToDataUrl(file) });
+    const bruta = await fileToDataUrl(file);
+    updateBrand({ logoDataUrl: await removerFundoLogo(bruta) });
   }
 
   async function onBgChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -140,11 +192,23 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
         imagemBase64: imagemAnexada?.base64,
         imagemTipo: imagemAnexada?.tipo,
       });
-      setText({ headline: r.headline, corpo: r.corpo, legenda: r.legenda });
+      setText({
+        headline: r.headline,
+        corpo: r.corpo,
+        legenda: r.legenda,
+        elementoVisual: r.elementoVisual ?? null,
+        destaquesTitulo: r.destaquesTitulo ?? [],
+        destaquesCorpo: r.destaquesCorpo ?? [],
+        coresPalavrasTitulo: {},
+        coresPalavrasCorpo: {},
+      });
       setHistorico(r.historico);
       if (r.estilo?.template) setTemplate(r.estilo.template as TemplateId);
       if (r.estilo?.corDestaque) setAccentColor(r.estilo.corDestaque);
-      if (r.estilo?.tamanhoFonte) setFontScale(r.estilo.tamanhoFonte as FontScale);
+      if (r.estilo?.tamanhoFonte) {
+        const tamanho = TAMANHO_LEGADO[r.estilo.tamanhoFonte];
+        if (tamanho) setFontScale(tamanho);
+      }
       // Foto contextual escolhida pela ATLAS a partir do setor/tema da
       // decisão - só aplica se o advogado ainda não tiver subido a própria
       // foto de fundo (nunca sobrescreve escolha manual dele).
@@ -171,27 +235,80 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
     void enviar("Gere um post a partir desta decisão.");
   }
 
+  // Cor manual por palavra (título/corpo) - sempre ganha do destaque
+  // automático da IA (mesmo recurso do carrossel, ver InstagramWorkspace).
+  function mudarCorPalavra(campo: "titulo" | "corpo", indicePalavra: number, cor: string) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setText((prev) => (prev ? { ...prev, [chave]: { ...prev[chave], [indicePalavra]: cor } } : prev));
+  }
+
+  function limparCorPalavra(campo: "titulo" | "corpo", indicePalavra: number) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setText((prev) => {
+      if (!prev) return prev;
+      const atual = { ...prev[chave] };
+      delete atual[indicePalavra];
+      return { ...prev, [chave]: atual };
+    });
+  }
+
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    renderInstagramPost(canvas, {
+    renderPostComModelo(canvas, {
       width: CANVAS_W,
       height: CANVAS_H,
       backgroundDataUrl: bgDataUrl,
-      accentColor,
+      corDestaque: accentColor,
       logoDataUrl: brand.logoDataUrl,
       nomeEscritorio: brand.nomeEscritorio,
       registro: brand.registro,
       kicker: formatarKicker(item.tribunal, item.data),
       headline: text?.headline || item.titulo,
       corpo: text?.corpo || item.resumoExecutivo,
-      template,
-      fontScale,
-      fontFamily,
-    }).catch(() => {
-      // falha ao carregar imagem (logo/fundo corrompidos) - a arte segue sem travar
-    });
-  }, [bgDataUrl, brand, text, item, accentColor, template, fontScale, fontFamily]);
+      perfil: PERFIS_NOTICIAS[template],
+      // Post único (não carrossel) - é sempre "a peça final", então ganha
+      // a mesma linha de ícones (enviar/compartilhar/salvar) que o slide
+      // de fechamento do carrossel usa, pra parecer pronto pra publicar
+      // igual em qualquer área (ver renderPostComModelo::iconesAcao).
+      iconesAcao: true,
+      // Um único controle de tamanho pro post inteiro (sempre foi assim
+      // aqui, diferente do carrossel/Estúdio Visual que têm um slider por
+      // texto) - mesma unidade (ver TAMANHOS_FONTE/escalaDoTamanho), só
+      // aplicada nos quatro papéis de uma vez.
+      tamanhoRotulo: fontScale,
+      tamanhoTitulo: fontScale,
+      tamanhoCorpo: fontScale,
+      tamanhoRodape: fontScale,
+      posicoes: posicoesEscolhidas,
+      alinhamentoRotulo: alinhamentoRotulo ?? undefined,
+      alinhamentoTitulo: alinhamentoTitulo ?? undefined,
+      alinhamentoCorpo: alinhamentoCorpo ?? undefined,
+      alinhamentoRodape: alinhamentoRodape ?? undefined,
+      elementoVisual: text?.elementoVisual,
+      destaquesTitulo: text?.destaquesTitulo,
+      destaquesCorpo: text?.destaquesCorpo,
+      coresPalavrasTitulo: text?.coresPalavrasTitulo,
+      coresPalavrasCorpo: text?.coresPalavrasCorpo,
+    })
+      .then(setPosicoesAtuais)
+      .catch(() => {
+        // falha ao carregar imagem (logo/fundo corrompidos) - a arte segue sem travar
+      });
+  }, [
+    bgDataUrl,
+    brand,
+    text,
+    item,
+    accentColor,
+    template,
+    fontScale,
+    posicoesEscolhidas,
+    alinhamentoRotulo,
+    alinhamentoTitulo,
+    alinhamentoCorpo,
+    alinhamentoRodape,
+  ]);
 
   useEffect(() => {
     draw();
@@ -371,47 +488,21 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1.5">
-                Tamanho da letra
-              </div>
-              <div className="inline-flex rounded-md border border-border overflow-hidden w-full">
-                {(["pequena", "media", "grande"] as FontScale[]).map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setFontScale(s)}
-                    className={`flex-1 py-1.5 text-xs font-medium ${
-                      fontScale === s
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:bg-accent"
-                    }`}
-                  >
-                    {s === "pequena" ? "P" : s === "media" ? "M" : "G"}
-                  </button>
-                ))}
-              </div>
+          <div>
+            <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1.5">
+              Tamanho da letra
             </div>
-            <div>
-              <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1.5">
-                Fonte
-              </div>
-              <div className="inline-flex rounded-md border border-border overflow-hidden w-full">
-                {(["sans", "mono"] as FontFamilyId[]).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setFontFamily(f)}
-                    className={`flex-1 py-1.5 text-xs font-medium ${
-                      fontFamily === f
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:bg-accent"
-                    }`}
-                  >
-                    {f === "sans" ? "Sans" : "Mono"}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <select
+              value={fontScale}
+              onChange={(e) => setFontScale(Number(e.target.value))}
+              className="w-full bg-background border border-border rounded-md px-2 py-1.5 text-sm"
+            >
+              {TAMANHOS_FONTE.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -440,6 +531,11 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
           </div>
         </div>
 
+        <SeletorAlinhamento label="Alinhamento do rótulo" valor={alinhamentoRotulo} onChange={setAlinhamentoRotulo} />
+        <SeletorAlinhamento label="Alinhamento do título" valor={alinhamentoTitulo} onChange={setAlinhamentoTitulo} />
+        <SeletorAlinhamento label="Alinhamento do corpo" valor={alinhamentoCorpo} onChange={setAlinhamentoCorpo} />
+        <SeletorAlinhamento label="Alinhamento do rodapé" valor={alinhamentoRodape} onChange={setAlinhamentoRodape} />
+
         {text && (
           <>
             <div className="surface rounded-lg p-5 space-y-3">
@@ -457,6 +553,46 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
                 onChange={(v) => setText({ ...text, corpo: v })}
                 textarea
               />
+            </div>
+
+            <div className="surface rounded-lg p-4">
+              {text.elementoVisual && (
+                <div className="pb-3 mb-3 border-b border-border flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    Este post tem um número/gráfico em destaque
+                  </div>
+                  <button
+                    onClick={() => setText((prev) => (prev ? { ...prev, elementoVisual: null } : prev))}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-risk"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Remover
+                  </button>
+                </div>
+              )}
+              <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
+                Cor por palavra
+              </div>
+              <div className="space-y-2">
+                <PalavrasColoridas
+                  texto={text.headline}
+                  destaques={text.destaquesTitulo ?? []}
+                  overrides={text.coresPalavrasTitulo}
+                  corDestaque={accentColor}
+                  onMudarCor={(i, cor) => mudarCorPalavra("titulo", i, cor)}
+                  onLimparCor={(i) => limparCorPalavra("titulo", i)}
+                />
+                {text.corpo && (
+                  <PalavrasColoridas
+                    texto={text.corpo}
+                    destaques={text.destaquesCorpo ?? []}
+                    overrides={text.coresPalavrasCorpo}
+                    corDestaque={accentColor}
+                    onMudarCor={(i, cor) => mudarCorPalavra("corpo", i, cor)}
+                    onLimparCor={(i) => limparCorPalavra("corpo", i)}
+                  />
+                )}
+              </div>
             </div>
 
             <div className="surface rounded-lg p-5 space-y-2">
@@ -478,8 +614,56 @@ export function InstagramPostStudio({ item }: { item: PostableItem }) {
 
       {/* Preview + chat */}
       <div className="order-1 lg:order-2 flex flex-col gap-4">
-        <div className="w-full max-w-[420px] mx-auto surface rounded-lg overflow-hidden">
-          <canvas ref={canvasRef} className="w-full h-auto block" />
+        <div className="w-full max-w-[420px] mx-auto">
+          <PosicionadorTexto
+            posicoes={posicoesAtuais}
+            papeisAtivos={papeisAtivosDoPost(
+              text?.corpo || item.resumoExecutivo,
+              !!brand.logoDataUrl,
+              !!text?.elementoVisual,
+            )}
+            onMover={(papel, xPct, yPct) =>
+              setPosicoesEscolhidas((prev) => ({
+                ...prev,
+                [papel]: { ...prev[papel], xPct, yPct },
+              }))
+            }
+            onRedimensionarLogo={(escala) =>
+              setPosicoesEscolhidas((prev) => ({
+                ...prev,
+                logo: {
+                  xPct: prev.logo?.xPct ?? posicoesAtuais.logo?.xPct ?? 0,
+                  yPct: prev.logo?.yPct ?? posicoesAtuais.logo?.yPct ?? 0,
+                  escala,
+                },
+              }))
+            }
+            onRedimensionarGrafico={(escala) =>
+              setPosicoesEscolhidas((prev) => ({
+                ...prev,
+                grafico: {
+                  xPct: prev.grafico?.xPct ?? posicoesAtuais.grafico?.xPct ?? 0,
+                  yPct: prev.grafico?.yPct ?? posicoesAtuais.grafico?.yPct ?? 0,
+                  escala,
+                },
+              }))
+            }
+          >
+            <div className="surface rounded-lg overflow-hidden">
+              <canvas ref={canvasRef} className="w-full h-auto block" />
+            </div>
+          </PosicionadorTexto>
+          <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-muted-foreground">
+            <span>Arraste as etiquetas na imagem pra mover cada texto</span>
+            {Object.keys(posicoesEscolhidas).length > 0 && (
+              <button
+                onClick={() => setPosicoesEscolhidas({})}
+                className="text-primary hover:underline"
+              >
+                Redefinir posições
+              </button>
+            )}
+          </div>
         </div>
         {text && (
           <button

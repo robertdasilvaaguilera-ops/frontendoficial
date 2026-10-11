@@ -22,19 +22,30 @@ import {
   type ImagemSugerida,
   type SlideCarrossel,
   type TomCarrossel,
+  type ConfigModeloVisual,
 } from "@/lib/atlas-api";
 import { fileToDataUrl, formatarKicker, getBrandConfig, saveBrandConfig } from "@/lib/brand-config";
+import { ModelosVisuaisPainel } from "@/components/ModelosVisuaisPainel";
 import {
   renderPostComModelo,
   FONTES_DESTAQUE,
   KICKER_ESTILOS,
   ESTILOS_DESTAQUE_TEXTO,
+  TAMANHOS_FONTE,
+  TAMANHO_FONTE_PADRAO,
   type FonteDestaqueId,
   type KickerEstiloId,
   type EstiloDestaqueId,
-  type FontScale,
+  type PapelTexto,
+  type ChaveArrasto,
+  type PosicoesTexto,
   type PerfilVisual,
+  type AlinhamentoTexto,
+  removerFundoLogo,
 } from "@/lib/instagram-canvas";
+import { PosicionadorTexto } from "@/components/PosicionadorTexto";
+import { PalavrasColoridas } from "@/components/PalavrasColoridas";
+import { SeletorAlinhamento } from "@/components/SeletorAlinhamento";
 import type { PostableItem } from "@/components/InstagramPostStudio";
 import {
   Dialog,
@@ -62,6 +73,7 @@ const SLIDE_LABELS: Record<SlideCarrossel["tipo"], string> = {
   quem_afetado: "Quem é afetado",
   impacto: "Impacto",
   recomendacao: "O que fazer",
+  fechamento: "Fechamento",
 };
 
 interface Referencia {
@@ -70,7 +82,29 @@ interface Referencia {
   preview: string;
 }
 
-export function InstagramWorkspace({ item }: { item: PostableItem }) {
+// Só mostra alça de arrastar pra texto que o slide realmente tem - rótulo
+// e título são sempre preenchidos pela IA, corpo é opcional, rodapé
+// sempre desenha algo (nome real ou "Seu Escritório"). A logo só entra
+// quando o escritório tem uma configurada, senão não existe nada pra
+// arrastar.
+function papeisAtivosDoSlide(slide: SlideCarrossel | undefined, temLogo: boolean): ChaveArrasto[] {
+  const papeis: ChaveArrasto[] = ["rotulo", "titulo", "rodape"];
+  if (slide?.corpo?.trim()) papeis.push("corpo");
+  if (temLogo) papeis.push("logo");
+  if (slide?.elementoVisual) papeis.push("grafico");
+  return papeis;
+}
+
+export function InstagramWorkspace({
+  item,
+  anguloProspeccaoInicial,
+}: {
+  item: PostableItem;
+  // Ângulo já decidido na análise de conteúdo B2B (ver rota /prospeccao) -
+  // quando vem, toda geração deste carrossel (inclusive regenerações) usa
+  // esse ângulo como fio condutor em vez de um resumo genérico da decisão.
+  anguloProspeccaoInicial?: string;
+}) {
   const [identidade, setIdentidade] = useState<"atlas" | "propria">("atlas");
   const [referencias, setReferencias] = useState<Referencia[]>([]);
   const [tom, setTom] = useState<TomCarrossel | null>(null);
@@ -81,12 +115,34 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
   const [marca, setMarca] = useState(() => getBrandConfig());
   const [fonte, setFonte] = useState<FonteDestaqueId>("inter");
   const [kickerEstilo, setKickerEstilo] = useState<KickerEstiloId>("solido");
-  const [escalaFonte, setEscalaFonte] = useState<FontScale>("media");
+  // Tamanho de cada texto, independente - 2/4/6/8/10.../40, sem exceção
+  // (10 = padrão, o tamanho de sempre). Ver TAMANHOS_FONTE.
+  const [tamanhoRotulo, setTamanhoRotulo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoTitulo, setTamanhoTitulo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoCorpo, setTamanhoCorpo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoRodape, setTamanhoRodape] = useState(TAMANHO_FONTE_PADRAO);
   // null = usa a cor do perfil visual extraído das referências (o padrão
   // de sempre) - só vira um hex fixo quando o usuário troca manualmente.
   const [corDestaque, setCorDestaque] = useState<string | null>(null);
   const [estiloTitulo, setEstiloTitulo] = useState<EstiloDestaqueId>("nenhum");
   const [estiloCorpo, setEstiloCorpo] = useState<EstiloDestaqueId>("nenhum");
+  // null = cada texto segue o próprio padrão (perfil visual pro título/
+  // corpo, esquerda pro rótulo/rodapé) - só vira escolha fixa quando o
+  // usuário aperta um dos botões. Um por texto (não mais um único botão
+  // pro post inteiro), pra poder combinar ex: rótulo à esquerda com
+  // título centralizado.
+  const [alinhamentoRotulo, setAlinhamentoRotulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoTitulo, setAlinhamentoTitulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoCorpo, setAlinhamentoCorpo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoRodape, setAlinhamentoRodape] = useState<AlinhamentoTexto | null>(null);
+  // Posição livre - vazio = ninguém foi arrastado ainda, cada texto fica
+  // no lugar calculado pelo layout do perfil (comportamento de sempre).
+  // Aplica pra todos os slides do carrossel (igual tamanho/cor/estilo já
+  // fazem) - o usuário arrasta uma vez, vale pro carrossel inteiro.
+  const [posicoesEscolhidas, setPosicoesEscolhidas] = useState<PosicoesTexto>({});
+  // Posição EFETIVA do slide ativo (arrastada ou padrão) - devolvida pelo
+  // desenho do canvas, usada só pra saber onde colocar a alça de arrastar.
+  const [posicoesAtuais, setPosicoesAtuais] = useState<PosicoesTexto>({});
 
   const [imagemEscolhidaId, setImagemEscolhidaId] = useState<number | null>(null);
   const [galeriaAberta, setGaleriaAberta] = useState(false);
@@ -134,7 +190,8 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
   async function onLogoChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    atualizarMarca({ logoDataUrl: await fileToDataUrl(file) });
+    const bruta = await fileToDataUrl(file);
+    atualizarMarca({ logoDataUrl: await removerFundoLogo(bruta) });
     e.target.value = "";
   }
 
@@ -146,6 +203,7 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
     imagemIdNovo?: number;
   }) {
     if (!pronto) return;
+    const primeiraVez = !resultado;
     setLoading(true);
     setErro(null);
     try {
@@ -161,6 +219,7 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
           : instrucao.trim() || undefined,
         historico: manterTextos ? resultado?.historico : [],
         imagemId: opts?.imagemIdNovo ?? imagemEscolhidaId,
+        anguloProspeccao: anguloProspeccaoInicial,
       });
       setResultado(r);
       setSlides(r.slides);
@@ -168,6 +227,18 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
       setCta(r.cta);
       setHashtags(r.hashtags);
       setAtivo(0);
+      // Réplica fiel: na primeira geração, os controles de estilo partem
+      // exatamente do que foi extraído da identidade (própria ou padrão
+      // ATLAS) - não do padrão hardcoded. Só na primeira vez, pra não
+      // sobrescrever ajustes manuais que o usuário já tenha feito quando
+      // clica em "gerar novamente"/trocar imagem depois.
+      if (primeiraVez) {
+        const perfil = r.perfilVisual;
+        setFonte(perfil.fonteDestaque as FonteDestaqueId);
+        setKickerEstilo(perfil.kickerEstilo as KickerEstiloId);
+        setEstiloTitulo(perfil.estiloTitulo as EstiloDestaqueId);
+        setEstiloCorpo(perfil.estiloCorpo as EstiloDestaqueId);
+      }
     } catch (err) {
       setErro(err instanceof Error ? err.message : "Não consegui gerar o carrossel agora.");
     } finally {
@@ -211,10 +282,40 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
     setTom(null);
     setInstrucao("");
     setImagemEscolhidaId(null);
+    setPosicoesEscolhidas({});
   }
 
   function atualizarSlide(idx: number, patch: Partial<SlideCarrossel>) {
     setSlides((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  }
+
+  // Cor manual por palavra (título/corpo) - sempre ganha do destaque
+  // automático da IA. Fica só no estado do slide (nunca volta pro
+  // backend), igual à posição livre de texto.
+  function mudarCorPalavra(
+    campo: "titulo" | "corpo",
+    idx: number,
+    indicePalavra: number,
+    cor: string,
+  ) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setSlides((prev) =>
+      prev.map((s, i) =>
+        i === idx ? { ...s, [chave]: { ...s[chave], [indicePalavra]: cor } } : s,
+      ),
+    );
+  }
+
+  function limparCorPalavra(campo: "titulo" | "corpo", idx: number, indicePalavra: number) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setSlides((prev) =>
+      prev.map((s, i) => {
+        if (i !== idx) return s;
+        const atual = { ...s[chave] };
+        delete atual[indicePalavra];
+        return { ...s, [chave]: atual };
+      }),
+    );
   }
 
   function moverSlide(idx: number, direcao: -1 | 1) {
@@ -232,12 +333,15 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
     async (idx: number) => {
       const slide = slides[idx];
       if (!slide || !resultado) return;
+      const ehFechamento = slide.tipo === "fechamento";
       const opts = {
         width: CANVAS_W,
         height: CANVAS_H,
-        // Mesma foto contextual em todos os slides (não só na capa) - dá
-        // consistência visual ao carrossel inteiro, não só à primeira tela.
-        backgroundDataUrl: resultado.imagemFundoDataUrl,
+        // Mesma foto contextual em todos os slides, exceto o de fechamento:
+        // esse fica com fundo neutro (sem a imagem do assunto), como um
+        // post "pronto pra publicar", com os ícones de enviar/salvar.
+        backgroundDataUrl: ehFechamento ? null : resultado.imagemFundoDataUrl,
+        iconesAcao: ehFechamento,
         logoDataUrl: marca.logoDataUrl,
         nomeEscritorio: marca.nomeEscritorio || "Seu Escritório",
         registro: marca.registro,
@@ -250,18 +354,35 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
         kickerEstilo,
         estiloTitulo,
         estiloCorpo,
-        escalaFonte,
+        tamanhoRotulo,
+        tamanhoTitulo,
+        tamanhoCorpo,
+        tamanhoRodape,
         corDestaque: corDestaque ?? undefined,
+        alinhamentoRotulo: alinhamentoRotulo ?? undefined,
+        alinhamentoTitulo: alinhamentoTitulo ?? undefined,
+        alinhamentoCorpo: alinhamentoCorpo ?? undefined,
+        alinhamentoRodape: alinhamentoRodape ?? undefined,
+        posicoes: posicoesEscolhidas,
+        componente: slide.componente,
+        elementoVisual: slide.elementoVisual,
+        destaquesTitulo: slide.destaquesTitulo,
+        destaquesCorpo: slide.destaquesCorpo,
+        coresPalavrasTitulo: slide.coresPalavrasTitulo,
+        coresPalavrasCorpo: slide.coresPalavrasCorpo,
       };
       // Desenha no canvas principal e na miniatura separadamente (são
       // elementos <canvas> distintos, não dá pra reaproveitar um só) -
-      // ambos ficam sempre em sincronia com o mesmo estado do slide.
+      // ambos ficam sempre em sincronia com o mesmo estado do slide. Só o
+      // slide ativo atualiza a posição efetiva (pra alça de arrastar) -
+      // os outros desenham em segundo plano sem mexer na UI de arrastar.
       const principal = canvasRefs.current[idx];
       const miniatura = thumbRefs.current[idx];
-      await Promise.all([
-        principal ? renderPostComModelo(principal, opts).catch(() => {}) : null,
-        miniatura ? renderPostComModelo(miniatura, opts).catch(() => {}) : null,
+      const [posicoesDoPrincipal] = await Promise.all([
+        principal ? renderPostComModelo(principal, opts).catch(() => ({})) : Promise.resolve({}),
+        miniatura ? renderPostComModelo(miniatura, opts).catch(() => ({})) : null,
       ]);
+      if (idx === ativo) setPosicoesAtuais(posicoesDoPrincipal);
     },
     [
       slides,
@@ -272,8 +393,17 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
       kickerEstilo,
       estiloTitulo,
       estiloCorpo,
-      escalaFonte,
+      tamanhoRotulo,
+      tamanhoTitulo,
+      tamanhoCorpo,
+      tamanhoRodape,
       corDestaque,
+      alinhamentoRotulo,
+      alinhamentoTitulo,
+      alinhamentoCorpo,
+      alinhamentoRodape,
+      posicoesEscolhidas,
+      ativo,
     ],
   );
 
@@ -315,6 +445,17 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
           A ATLAS já sabe tudo sobre esta decisão. Em poucos segundos você recebe um carrossel
           pronto — pensado para gerar autoridade e trazer conversas comerciais, não só informar.
         </p>
+
+        {anguloProspeccaoInicial && (
+          <div className="mt-4 mx-auto max-w-md rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-left">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-primary">
+              Ângulo de prospecção definido
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+              {anguloProspeccaoInicial}
+            </p>
+          </div>
+        )}
 
         <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-3 text-left">
           <button
@@ -473,17 +614,48 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
         {/* Preview principal */}
         <div>
           <div className="relative w-full max-w-[380px] mx-auto">
-            <div className="surface rounded-lg overflow-hidden">
-              {slides.map((_, idx) => (
-                <canvas
-                  key={idx}
-                  ref={(el) => {
-                    canvasRefs.current[idx] = el;
-                  }}
-                  className={`w-full h-auto block ${idx === ativo ? "" : "hidden"}`}
-                />
-              ))}
-            </div>
+            <PosicionadorTexto
+              posicoes={posicoesAtuais}
+              papeisAtivos={papeisAtivosDoSlide(slideAtivo, !!marca.logoDataUrl)}
+              onMover={(papel, xPct, yPct) =>
+                setPosicoesEscolhidas((prev) => ({
+                  ...prev,
+                  [papel]: { ...prev[papel], xPct, yPct },
+                }))
+              }
+              onRedimensionarLogo={(escala) =>
+                setPosicoesEscolhidas((prev) => ({
+                  ...prev,
+                  logo: {
+                    xPct: prev.logo?.xPct ?? posicoesAtuais.logo?.xPct ?? 0,
+                    yPct: prev.logo?.yPct ?? posicoesAtuais.logo?.yPct ?? 0,
+                    escala,
+                  },
+                }))
+              }
+              onRedimensionarGrafico={(escala) =>
+                setPosicoesEscolhidas((prev) => ({
+                  ...prev,
+                  grafico: {
+                    xPct: prev.grafico?.xPct ?? posicoesAtuais.grafico?.xPct ?? 0,
+                    yPct: prev.grafico?.yPct ?? posicoesAtuais.grafico?.yPct ?? 0,
+                    escala,
+                  },
+                }))
+              }
+            >
+              <div className="surface rounded-lg overflow-hidden">
+                {slides.map((_, idx) => (
+                  <canvas
+                    key={idx}
+                    ref={(el) => {
+                      canvasRefs.current[idx] = el;
+                    }}
+                    className={`w-full h-auto block ${idx === ativo ? "" : "hidden"}`}
+                  />
+                ))}
+              </div>
+            </PosicionadorTexto>
             <button
               onClick={() => setAtivo((a) => Math.max(0, a - 1))}
               disabled={ativo === 0}
@@ -498,6 +670,18 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
             >
               <ChevronRight className="h-4 w-4" />
             </button>
+          </div>
+
+          <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-muted-foreground">
+            <span>Arraste as etiquetas na imagem pra mover cada texto</span>
+            {Object.keys(posicoesEscolhidas).length > 0 && (
+              <button
+                onClick={() => setPosicoesEscolhidas({})}
+                className="text-primary hover:underline"
+              >
+                Redefinir posições
+              </button>
+            )}
           </div>
 
           {/* Miniaturas + reordenar */}
@@ -610,6 +794,39 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
             {erro && <p className="mt-2 text-xs text-risk">{erro}</p>}
           </div>
 
+          <ModelosVisuaisPainel
+            configAtual={{
+              fonte,
+              kickerEstilo,
+              estiloTitulo,
+              estiloCorpo,
+              tamanhoRotulo,
+              tamanhoTitulo,
+              tamanhoCorpo,
+              tamanhoRodape,
+              corDestaque,
+              alinhamentoRotulo,
+              alinhamentoTitulo,
+              alinhamentoCorpo,
+              alinhamentoRodape,
+            }}
+            onAplicar={(c: ConfigModeloVisual) => {
+              setFonte(c.fonte as FonteDestaqueId);
+              setKickerEstilo(c.kickerEstilo as KickerEstiloId);
+              setEstiloTitulo(c.estiloTitulo as EstiloDestaqueId);
+              setEstiloCorpo(c.estiloCorpo as EstiloDestaqueId);
+              setTamanhoRotulo(c.tamanhoRotulo);
+              setTamanhoTitulo(c.tamanhoTitulo);
+              setTamanhoCorpo(c.tamanhoCorpo);
+              setTamanhoRodape(c.tamanhoRodape);
+              setCorDestaque(c.corDestaque);
+              setAlinhamentoRotulo((c.alinhamentoRotulo as AlinhamentoTexto) ?? null);
+              setAlinhamentoTitulo((c.alinhamentoTitulo as AlinhamentoTexto) ?? null);
+              setAlinhamentoCorpo((c.alinhamentoCorpo as AlinhamentoTexto) ?? null);
+              setAlinhamentoRodape((c.alinhamentoRodape as AlinhamentoTexto) ?? null);
+            }}
+          />
+
           <div className="surface rounded-lg p-4">
             <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
               Fonte do título
@@ -636,20 +853,11 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
               <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1.5">
                 Tamanho da fonte
               </div>
-              <div className="inline-flex rounded-md border border-border overflow-hidden w-full">
-                {(["pequena", "media", "grande"] as FontScale[]).map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setEscalaFonte(s)}
-                    className={`flex-1 py-1.5 text-xs font-medium ${
-                      escalaFonte === s
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:bg-accent"
-                    }`}
-                  >
-                    {s === "pequena" ? "P" : s === "media" ? "M" : "G"}
-                  </button>
-                ))}
+              <div className="grid grid-cols-2 gap-2">
+                <SeletorTamanho label="Rótulo" valor={tamanhoRotulo} onChange={setTamanhoRotulo} />
+                <SeletorTamanho label="Título" valor={tamanhoTitulo} onChange={setTamanhoTitulo} />
+                <SeletorTamanho label="Corpo" valor={tamanhoCorpo} onChange={setTamanhoCorpo} />
+                <SeletorTamanho label="Rodapé" valor={tamanhoRodape} onChange={setTamanhoRodape} />
               </div>
             </div>
 
@@ -678,6 +886,11 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
               </div>
             </div>
           </div>
+
+          <SeletorAlinhamento label="Alinhamento do rótulo" valor={alinhamentoRotulo} onChange={setAlinhamentoRotulo} />
+          <SeletorAlinhamento label="Alinhamento do título" valor={alinhamentoTitulo} onChange={setAlinhamentoTitulo} />
+          <SeletorAlinhamento label="Alinhamento do corpo" valor={alinhamentoCorpo} onChange={setAlinhamentoCorpo} />
+          <SeletorAlinhamento label="Alinhamento do rodapé" valor={alinhamentoRodape} onChange={setAlinhamentoRodape} />
 
           <div className="surface rounded-lg p-4">
             <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
@@ -789,6 +1002,45 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
                   )}
                 </div>
               )}
+
+              {slideAtivo.elementoVisual && (
+                <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    Este slide tem um número/gráfico em destaque
+                  </div>
+                  <button
+                    onClick={() => atualizarSlide(ativo, { elementoVisual: null })}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-risk"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Remover
+                  </button>
+                </div>
+              )}
+
+              <div className="mt-3 pt-3 border-t border-border space-y-2">
+                <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+                  Cor por palavra
+                </div>
+                <PalavrasColoridas
+                  texto={slideAtivo.headline}
+                  destaques={slideAtivo.destaquesTitulo}
+                  overrides={slideAtivo.coresPalavrasTitulo}
+                  corDestaque={corDestaque ?? resultado.perfilVisual.corPrimaria}
+                  onMudarCor={(i, cor) => mudarCorPalavra("titulo", ativo, i, cor)}
+                  onLimparCor={(i) => limparCorPalavra("titulo", ativo, i)}
+                />
+                {slideAtivo.corpo && (
+                  <PalavrasColoridas
+                    texto={slideAtivo.corpo}
+                    destaques={slideAtivo.destaquesCorpo}
+                    overrides={slideAtivo.coresPalavrasCorpo}
+                    corDestaque={corDestaque ?? resultado.perfilVisual.corPrimaria}
+                    onMudarCor={(i, cor) => mudarCorPalavra("corpo", ativo, i, cor)}
+                    onLimparCor={(i) => limparCorPalavra("corpo", ativo, i)}
+                  />
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -880,5 +1132,32 @@ export function InstagramWorkspace({ item }: { item: PostableItem }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function SeletorTamanho({
+  label,
+  valor,
+  onChange,
+}: {
+  label: string;
+  valor: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block">
+      <div className="text-[9px] text-muted-foreground mb-1">{label}</div>
+      <select
+        value={valor}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full bg-background border border-border rounded-md px-2 py-1.5 text-xs"
+      >
+        {TAMANHOS_FONTE.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

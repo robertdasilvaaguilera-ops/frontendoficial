@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { Compass, Loader2, Lock, LogOut, User } from "lucide-react";
+import { Loader2, Lock, LogOut, User } from "lucide-react";
+import { AtlasLogo } from "@/components/AtlasLogo";
 import {
   getAuthStatus,
   loginAuth,
@@ -10,12 +11,7 @@ import {
   type NivelAcesso,
   type UsoAtual,
 } from "@/lib/auth-api";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { POLITICA_PRIVACIDADE, TERMOS_USO, type SecaoTermos } from "@/lib/termos-conteudo";
 
 export interface SessaoAtual {
@@ -152,10 +148,7 @@ function LoginScreen({ modo, onEntrou }: { modo: "login" | "setup"; onEntrou: ()
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center gap-2 mb-8">
-          <div className="h-10 w-10 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
-            <Compass className="h-5 w-5" />
-          </div>
-          <div className="text-sm font-semibold tracking-tight">ATLAS</div>
+          <AtlasLogo size={38} tagline={null} className="flex-col text-center" />
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
             Inteligência Jurídica
           </div>

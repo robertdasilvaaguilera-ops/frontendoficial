@@ -234,6 +234,12 @@ export interface InstagramPostText {
   // PEXELS_API_KEY configurada no backend, sem internet, sem resultado).
   imagemFundoDataUrl?: string | null;
   contextoVisual?: string | null;
+  // Número/gráfico em destaque e trechos com cor automática (psicologia
+  // da atenção) - mesmo recurso do carrossel (ver SlideCarrossel), agora
+  // também no post único (Notícias e Estúdio Visual).
+  elementoVisual?: ElementoVisualSlideResposta | null;
+  destaquesTitulo?: string[];
+  destaquesCorpo?: string[];
 }
 
 export interface GerarPostInstagramParams {
@@ -282,6 +288,13 @@ export async function gerarPostInstagram({
 // nada da geração existente.
 export interface PerfilVisualResposta {
   logoPosicao: string;
+  logoEscala: number;
+  // Só o carrossel manda esses dois (ver ai/carrossel.py) - o Estúdio
+  // Visual (/post-com-modelo) ainda não calcula um Sistema de Design (fase
+  // 5 do plano de arquitetura), então fica undefined lá e o renderer cai
+  // no padrão seguro "auto" (ver instagram-canvas.ts::PerfilVisual).
+  logoContraste?: string;
+  logoAreaSeguraPx?: number;
   tituloAlinhamento: string;
   tituloPosicaoVertical: string;
   tituloCaixaAlta: boolean;
@@ -291,6 +304,10 @@ export interface PerfilVisualResposta {
   fundoTipo: string;
   imagemProporcao: number;
   temFaixaRodape: boolean;
+  fonteDestaque: string;
+  kickerEstilo: string;
+  estiloTitulo: string;
+  estiloCorpo: string;
   estiloGeral: string;
   observacoes: string;
 }
@@ -302,6 +319,9 @@ export interface PostComModeloResposta {
   perfilVisual: PerfilVisualResposta;
   imagemFundoDataUrl: string | null;
   contextoVisual: string | null;
+  elementoVisual?: ElementoVisualSlideResposta | null;
+  destaquesTitulo?: string[];
+  destaquesCorpo?: string[];
 }
 
 export interface GerarPostComModeloParams {
@@ -343,11 +363,37 @@ export async function gerarPostComModelo({
 export type TomCarrossel =
   "tecnico" | "empresarial" | "comercial" | "informativo" | "sofisticado" | "minimalista";
 
+export type ElementoVisualSlideResposta =
+  | { tipo: "numero_destaque"; valor: string; rotulo: string }
+  | { tipo: "grafico_barra"; itens: { rotulo: string; valor: number }[] }
+  | { tipo: "grafico_rosca"; rotulo: string; percentual: number }
+  | {
+      tipo: "comparacao";
+      antes: { rotulo: string; valor: string };
+      depois: { rotulo: string; valor: string };
+    };
+
 export interface SlideCarrossel {
-  tipo: "capa" | "porque_importa" | "quem_afetado" | "impacto" | "recomendacao";
+  tipo: "capa" | "porque_importa" | "quem_afetado" | "impacto" | "recomendacao" | "fechamento";
   kicker: string;
   headline: string;
   corpo: string;
+  elementoVisual: ElementoVisualSlideResposta | null;
+  // Qual componente da biblioteca do Sistema de Design este slide usa (ex:
+  // "bloco_risco", "destaque_numerico", "chamada_salvar") - decidido pelo
+  // estágio de Direção de Arte no backend (ver ai/direcao_arte.py), nunca
+  // pelo usuário. null nos carrosséis de prospecção (angulo_prospeccao),
+  // que ainda não passam por essa etapa.
+  componente: string | null;
+  // Trechos do título/corpo com número/dado real que a IA já marca pra
+  // ganhar a cor de destaque automaticamente (psicologia da atenção).
+  destaquesTitulo: string[];
+  destaquesCorpo: string[];
+  // Cor manual por palavra (índice da palavra no texto completo) - só
+  // existe no front, nunca vem nem volta pro backend; editado clicando
+  // na palavra (ver InstagramWorkspace). Sempre ganha do destaque acima.
+  coresPalavrasTitulo?: Record<number, string>;
+  coresPalavrasCorpo?: Record<number, string>;
 }
 
 export interface CarrosselResposta {
@@ -371,6 +417,10 @@ export interface GerarCarrosselParams {
   mensagem?: string;
   historico?: Array<{ role: string; content: string }>;
   imagemId?: number | null;
+  // Ângulo já decidido na análise de conteúdo B2B (ver Prospecção) - quando
+  // vem, o carrossel inteiro usa esse ângulo como fio condutor em vez de
+  // um resumo genérico da decisão.
+  anguloProspeccao?: string | null;
 }
 
 export async function gerarCarrossel({
@@ -382,6 +432,7 @@ export async function gerarCarrossel({
   mensagem,
   historico,
   imagemId,
+  anguloProspeccao,
 }: GerarCarrosselParams): Promise<CarrosselResposta> {
   if (!API_URL) {
     throw new Error(
@@ -398,6 +449,7 @@ export async function gerarCarrossel({
       mensagem: mensagem ?? null,
       historico: historico ?? [],
       imagemId: imagemId ?? null,
+      anguloProspeccao: anguloProspeccao ?? null,
     }),
     credentials: "include",
   });
@@ -406,6 +458,89 @@ export async function gerarCarrossel({
     throw new Error(body?.detail || `Falha ao gerar o carrossel (HTTP ${r.status})`);
   }
   return (await r.json()) as CarrosselResposta;
+}
+
+// Prospecção B2B — motor que decide QUAIS decisões do dia têm potencial
+// real de virar conteúdo de aquisição pra advogado/contador (não é todo
+// item juridicamente relevante que serve pra isso, ver
+// backend/ai/analise_conteudo.py). Índice determinístico (grátis, roda em
+// tudo) escolhe uma shortlist; só ela passa pela análise de público-alvo/
+// ângulo via Claude, cacheada por item.
+export type NivelPotencial = "alto" | "medio" | "baixo";
+
+export interface IndiceProspeccao {
+  indiceProspeccao: number;
+  subscores: {
+    alcanceEmpresas: number;
+    impactoEconomico: number;
+    setorDefinido: number;
+    novidade: number;
+    autoridadeFonte: number;
+    mecanismoIdentificado: number;
+  };
+}
+
+export interface PotencialComMotivo {
+  nivel: NivelPotencial;
+  motivo: string;
+}
+
+export interface AnaliseConteudo {
+  recomendado: boolean;
+  porQueRelevante: string;
+  quemEAfetado: string;
+  classificacao: "oportunidade" | "risco" | "informativo";
+  publicoAlvo: {
+    advogado: string;
+    contador: string;
+    empresario: string;
+  };
+  anguloProspeccao: string;
+  potencialCompartilhamento: PotencialComMotivo;
+  potencialSalvamento: PotencialComMotivo;
+  potencialConversaComercial: PotencialComMotivo;
+}
+
+export interface ItemProspeccao {
+  id: string;
+  tipo: "opportunities" | "news";
+  titulo: string;
+  tribunal: string;
+  data: string;
+  indice: IndiceProspeccao;
+  analise: AnaliseConteudo;
+}
+
+export async function buscarProspeccaoPrioritarias(
+  tipo: "opportunities" | "news",
+  limit = 5,
+): Promise<ItemProspeccao[]> {
+  if (!API_URL) return [];
+  const r = await fetch(`${API_URL}/prospeccao/prioritarias?tipo=${tipo}&limit=${limit}`, {
+    credentials: "include",
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || `Falha ao buscar decisões prioritárias (HTTP ${r.status})`);
+  }
+  return (await r.json()) as ItemProspeccao[];
+}
+
+export async function buscarAnaliseConteudo(
+  kind: "opportunities" | "news",
+  id: string,
+): Promise<{ indice: IndiceProspeccao; analise: AnaliseConteudo }> {
+  if (!API_URL) {
+    throw new Error(
+      "VITE_ATLAS_API_URL não configurada — conecte o backend Python para analisar o conteúdo.",
+    );
+  }
+  const r = await fetch(`${API_URL}/${kind}/${id}/analise-conteudo`, { credentials: "include" });
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || `Falha ao gerar a análise (HTTP ${r.status})`);
+  }
+  return (await r.json()) as { indice: IndiceProspeccao; analise: AnaliseConteudo };
 }
 
 export interface ImagemSugerida {
@@ -435,6 +570,70 @@ export async function buscarImagensSugeridas(
     throw new Error(body?.detail || `Falha ao buscar imagens sugeridas (HTTP ${r.status})`);
   }
   return (await r.json()) as ImagensSugeridasResposta;
+}
+
+// Modelo de estilo visual salvo — pra não reconfigurar fonte/tamanhos/cor
+// toda vez que for criar um post. Compartilhado entre a equipe.
+export interface ConfigModeloVisual {
+  fonte: string;
+  kickerEstilo: string;
+  estiloTitulo: string;
+  estiloCorpo: string;
+  tamanhoRotulo: number;
+  tamanhoTitulo: number;
+  tamanhoCorpo: number;
+  tamanhoRodape: number;
+  corDestaque: string | null;
+  // alinhamentoTexto: campo antigo (um só alinhamento pro post inteiro) -
+  // mantido só pra modelos salvos antes da troca pra alinhamento por
+  // texto continuarem carregando sem erro; nunca mais escrito. Os 4 de
+  // baixo são os que valem de verdade agora (ver SeletorAlinhamento).
+  alinhamentoTexto?: string | null;
+  alinhamentoRotulo?: string | null;
+  alinhamentoTitulo?: string | null;
+  alinhamentoCorpo?: string | null;
+  alinhamentoRodape?: string | null;
+}
+
+export interface ModeloVisual {
+  id: string;
+  nome: string;
+  config: ConfigModeloVisual;
+  criadoPor: string;
+  criadoEm: string;
+}
+
+export async function listarModelosVisuais(): Promise<ModeloVisual[]> {
+  if (!API_URL) return [];
+  const r = await fetch(`${API_URL}/modelos-visuais`, { credentials: "include" });
+  if (!r.ok) return [];
+  return (await r.json()) as ModeloVisual[];
+}
+
+export async function criarModeloVisual(
+  nome: string,
+  config: ConfigModeloVisual,
+): Promise<ModeloVisual> {
+  if (!API_URL) throw new Error("VITE_ATLAS_API_URL não configurada.");
+  const r = await fetch(`${API_URL}/modelos-visuais`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nome, config }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || `Falha ao salvar o modelo (HTTP ${r.status})`);
+  }
+  return (await r.json()) as ModeloVisual;
+}
+
+export async function removerModeloVisual(id: string): Promise<void> {
+  if (!API_URL) return;
+  await fetch(`${API_URL}/modelos-visuais/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
 }
 
 // Parecer técnico estruturado — gerado sob demanda pela Claude.

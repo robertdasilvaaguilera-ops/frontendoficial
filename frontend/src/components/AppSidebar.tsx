@@ -1,20 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useState } from "react";
-import {
-  Radar,
-  Users,
-  Newspaper,
-  Bot,
-  Compass,
-  Wand2,
-  UserCog,
-  Radio,
-  Menu,
-  X,
-} from "lucide-react";
+import { Radar, Users, Newspaper, Bot, Wand2, UserCog, Target, Radio, Menu, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { BotaoSair, useSessaoAtual } from "@/components/AuthGate";
 import { NIVEL_LABEL } from "@/lib/auth-api";
+import { AtlasLogo } from "@/components/AtlasLogo";
 
 type NavItem = {
   to: string;
@@ -26,21 +16,26 @@ const nav: NavItem[] = [
   { to: "/", label: "Radar Comercial", icon: Radar, exact: true },
   { to: "/clientes", label: "Minha Carteira", icon: Users },
   { to: "/noticias", label: "Notícias", icon: Newspaper },
+  { to: "/prospeccao", label: "Prospecção B2B", icon: Target },
   { to: "/copilot", label: "Copiloto ATLAS", icon: Bot },
   { to: "/estudio-visual", label: "Estúdio Visual", icon: Wand2 },
   { to: "/midia-social", label: "Mídia Social", icon: Radio },
   { to: "/usuarios", label: "Usuários", icon: UserCog },
 ];
 
-// Copiloto ATLAS (chat) some pro nível básico; Usuários é só do dono (admin,
-// guarda logins da equipe) - o backend já bloqueia os dois de qualquer
-// forma, isso aqui é só pra não oferecer um link que vai dar 403. Mídia
-// Social é de toda a equipe, qualquer nível. Compartilhado entre a barra
-// lateral (desktop) e o menu mobile pra não divergir os dois.
+// Copiloto ATLAS (chat) some pro nível básico; Minha Carteira e Estúdio
+// Visual também (básico só tem Radar e Notícias); Usuários é só do dono
+// (admin) - o backend já bloqueia todos de qualquer forma, isso aqui é
+// só pra não oferecer um link que vai dar 403. Mídia Social é de toda a
+// equipe, qualquer nível. Compartilhado entre a barra lateral (desktop) e
+// o menu mobile pra não divergir os dois.
 function useItensNavVisiveis() {
   const sessao = useSessaoAtual();
   return nav.filter((item) => {
     if (item.to === "/copilot") return sessao?.limites.chat !== false;
+    if (item.to === "/clientes" || item.to === "/estudio-visual" || item.to === "/prospeccao") {
+      return sessao?.limites.recursosAvancados !== false;
+    }
     if (item.to === "/usuarios") return sessao?.nivel === "admin";
     return true;
   });
@@ -57,19 +52,8 @@ export function AppSidebar() {
 
   return (
     <aside className="hidden lg:flex h-screen w-60 shrink-0 flex-col bg-sidebar/95 backdrop-blur-xl text-sidebar-foreground border-r border-sidebar-border sticky top-0">
-      <div className="px-5 py-5 flex items-center gap-2 border-b border-sidebar-border">
-        <div className="relative h-7 w-7 shrink-0">
-          <div className="absolute inset-0 rounded-md bg-primary/40 blur-md" aria-hidden="true" />
-          <div className="relative h-7 w-7 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
-            <Compass className="h-4 w-4" />
-          </div>
-        </div>
-        <div className="leading-tight">
-          <div className="text-sm font-semibold tracking-tight">ATLAS</div>
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
-            Inteligência Jurídica
-          </div>
-        </div>
+      <div className="px-5 py-5 border-b border-sidebar-border">
+        <AtlasLogo size={30} markClassName="text-sidebar-foreground" />
       </div>
 
       <nav className="flex-1 px-2 py-4 space-y-0.5">
@@ -145,15 +129,7 @@ export function MobileNav() {
   return (
     <>
       <header className="lg:hidden sticky top-0 z-40 flex items-center justify-between gap-2 border-b border-sidebar-border bg-sidebar/95 backdrop-blur-xl px-4 py-3 text-sidebar-foreground">
-        <div className="flex items-center gap-2">
-          <div className="relative h-6 w-6 shrink-0">
-            <div className="absolute inset-0 rounded-md bg-primary/40 blur-md" aria-hidden="true" />
-            <div className="relative h-6 w-6 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
-              <Compass className="h-3.5 w-3.5" />
-            </div>
-          </div>
-          <span className="text-sm font-semibold tracking-tight">ATLAS</span>
-        </div>
+        <AtlasLogo size={24} tagline={null} />
         <button
           onClick={() => setAberto(true)}
           aria-label="Abrir menu"
@@ -172,7 +148,7 @@ export function MobileNav() {
           />
           <nav className="absolute inset-y-0 left-0 w-64 max-w-[80vw] bg-sidebar text-sidebar-foreground border-r border-sidebar-border flex flex-col overflow-y-auto">
             <div className="px-5 py-5 flex items-center justify-between border-b border-sidebar-border">
-              <span className="text-sm font-semibold tracking-tight">ATLAS</span>
+              <AtlasLogo size={26} tagline={null} />
               <button
                 onClick={() => setAberto(false)}
                 aria-label="Fechar menu"

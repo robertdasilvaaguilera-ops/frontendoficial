@@ -4,6 +4,7 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
@@ -88,7 +89,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       // visível). appCss já inclui essas @font-face, então não precisa de
       // link nem preconnect externo aqui pras fontes centrais do app.
       { rel: "stylesheet", href: appCss },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      { rel: "icon", href: "/favicon.ico", type: "image/x-icon", sizes: "any" },
     ],
   }),
   shellComponent: RootShell,
@@ -126,20 +128,30 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  // /convite/$token é a página que a pessoa convidada abre ANTES de ter
+  // qualquer login - precisa ficar fora do AuthGate (que só libera o resto
+  // do app pra quem já está autenticado) e sem a barra lateral, que é só
+  // pra quem já entrou.
+  const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const rotaPublica = pathname.startsWith("/convite/");
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthGate>
-        <div className="flex min-h-screen w-full bg-background text-foreground">
-          <AppSidebar />
-          <div className="flex-1 min-w-0 flex flex-col">
-            <MobileNav />
-            <main className="flex-1 min-w-0">
-              <Outlet />
-            </main>
+      {rotaPublica ? (
+        <Outlet />
+      ) : (
+        <AuthGate>
+          <div className="flex min-h-screen w-full bg-background text-foreground">
+            <AppSidebar />
+            <div className="flex-1 min-w-0 flex flex-col">
+              <MobileNav />
+              <main className="flex-1 min-w-0">
+                <Outlet />
+              </main>
+            </div>
           </div>
-        </div>
-      </AuthGate>
+        </AuthGate>
+      )}
     </QueryClientProvider>
   );
 }

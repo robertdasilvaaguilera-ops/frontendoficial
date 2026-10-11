@@ -11,7 +11,17 @@
 export type TemplateId =
   "editorial-escuro" | "minimal-claro" | "cartao-centralizado" | "diagonal" | "faixa-superior";
 
-export type FontScale = "pequena" | "media" | "grande";
+// Alinhamento de título/corpo, escolhido manualmente pelo usuário (botões
+// esquerda/centro/direita) - compartilhado pelos dois motores (moderno e
+// legado) e pelo perfil visual (perfil.tituloAlinhamento usa o mesmo tipo).
+export type AlinhamentoTexto = "esquerda" | "centro" | "direita";
+
+export const ALINHAMENTO_CANVAS: Record<AlinhamentoTexto, CanvasTextAlign> = {
+  esquerda: "left",
+  centro: "center",
+  direita: "right",
+};
+
 export type FontFamilyId = "sans" | "mono";
 
 export const TEMPLATES: { id: TemplateId; label: string; descricao: string }[] = [
@@ -35,11 +45,17 @@ const FONT_FAMILIES: Record<FontFamilyId, string> = {
   mono: '"JetBrains Mono", "Courier New", monospace',
 };
 
-const FONT_SCALES: Record<FontScale, number> = {
-  pequena: 0.82,
-  media: 1,
-  grande: 1.2,
-};
+// Tamanho de fonte numérico e granular pra cada texto do carrossel/Estúdio
+// Visual (rótulo, título, corpo, rodapé) - substitui o antigo P/M/G único
+// (KICKER_ESTILOS já tinha virado "por texto"; agora o tamanho também).
+// Cada unidade = 10% do tamanho que a ATLAS sempre usou; 10 é o padrão
+// (100%, idêntico ao comportamento de antes quando nada é escolhido).
+export const TAMANHOS_FONTE = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40];
+export const TAMANHO_FONTE_PADRAO = 10;
+
+function escalaDoTamanho(tamanho: number | undefined): number {
+  return (tamanho ?? TAMANHO_FONTE_PADRAO) / TAMANHO_FONTE_PADRAO;
+}
 
 // Fontes de destaque pro título do carrossel ("instagramáveis" - display,
 // alto contraste, feitas pra headline curta e grande). Lemon Milk e
@@ -110,61 +126,6 @@ async function garantirFonteCarregada(id: FonteDestaqueId): Promise<void> {
   }
 }
 
-export interface RenderOptions {
-  width: number;
-  height: number;
-  backgroundDataUrl: string | null;
-  accentColor: string;
-  logoDataUrl: string | null;
-  nomeEscritorio: string;
-  registro: string;
-  kicker: string;
-  headline: string;
-  corpo: string;
-  template?: TemplateId;
-  fontScale?: FontScale;
-  fontFamily?: FontFamilyId;
-}
-
-const PAD = 64;
-
-export async function renderInstagramPost(
-  canvas: HTMLCanvasElement,
-  opts: RenderOptions,
-): Promise<void> {
-  canvas.width = opts.width;
-  canvas.height = opts.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const ctx2: Ctx2 = {
-    ctx,
-    W: opts.width,
-    H: opts.height,
-    font: FONT_FAMILIES[opts.fontFamily ?? "sans"],
-    scale: FONT_SCALES[opts.fontScale ?? "media"],
-    opts,
-  };
-
-  const template = opts.template ?? "editorial-escuro";
-  switch (template) {
-    case "minimal-claro":
-      await drawMinimalClaro(ctx2);
-      break;
-    case "cartao-centralizado":
-      await drawCartaoCentralizado(ctx2);
-      break;
-    case "diagonal":
-      await drawDiagonal(ctx2);
-      break;
-    case "faixa-superior":
-      await drawFaixaSuperior(ctx2);
-      break;
-    default:
-      await drawEditorialEscuro(ctx2);
-  }
-}
-
 // Escolhe um template diferente por caso (determinístico pelo id da
 // decisão/notícia) - assim 1000 usuários gerando posts em cima de casos
 // diferentes não caem sempre no mesmo layout. O advogado pode trocar depois.
@@ -174,370 +135,238 @@ export function templatePadraoPara(id: string): TemplateId {
   return TEMPLATES[hash % TEMPLATES.length].id;
 }
 
-interface Ctx2 {
-  ctx: CanvasRenderingContext2D;
-  W: number;
-  H: number;
-  font: string;
-  scale: number;
-  opts: RenderOptions;
+// --- Elemento visual contextual (número em destaque ou gráfico) ----------
+// Card compacto e opcional, desenhado só quando o conteúdo REAL da
+// decisão/notícia tem um número ou comparação forte o bastante pra virar
+// elemento visual - a IA extrai isso do texto de verdade (ver
+// ai/carrossel.py -> "elementoVisual"), nunca inventado aqui no desenho.
+// Tem posição livre igual aos textos e à logo (arrastável via
+// posicoes.grafico), pra caber em qualquer layout sem sobrepor o resto.
+export type ElementoVisualSlide =
+  | { tipo: "numero_destaque"; valor: string; rotulo: string }
+  | { tipo: "grafico_barra"; itens: { rotulo: string; valor: number }[] }
+  | { tipo: "grafico_rosca"; rotulo: string; percentual: number }
+  | {
+      tipo: "comparacao";
+      antes: { rotulo: string; valor: string };
+      depois: { rotulo: string; valor: string };
+    };
+
+function alturaElementoVisual(elemento: ElementoVisualSlide): number {
+  switch (elemento.tipo) {
+    case "numero_destaque":
+      return 112;
+    case "grafico_barra":
+      return elemento.itens.slice(0, 4).length * 42 + 14;
+    case "grafico_rosca":
+      return 116;
+    case "comparacao":
+      return 84;
+  }
 }
 
-// --- Template 1: editorial escuro (o original) --------------------------
-
-async function drawEditorialEscuro(c: Ctx2) {
-  const { ctx, W, H, font, scale, opts } = c;
-  const FOOTER_H = 96;
-  const KICKER_H = 48 * scale;
-  const HEADLINE_LH = 64 * scale;
-  const BODY_LH = 40 * scale;
-
-  if (opts.backgroundDataUrl) {
-    try {
-      drawCover(ctx, await loadImage(opts.backgroundDataUrl), 0, 0, W, H);
-    } catch {
-      drawGradientBackground(ctx, W, H, opts.accentColor);
-    }
-  } else {
-    drawGradientBackground(ctx, W, H, opts.accentColor);
-  }
-
-  const overlay = ctx.createLinearGradient(0, H * 0.32, 0, H);
-  overlay.addColorStop(0, "rgba(8,8,10,0)");
-  overlay.addColorStop(0.55, "rgba(8,8,10,0.74)");
-  overlay.addColorStop(1, "rgba(8,8,10,0.95)");
-  ctx.fillStyle = overlay;
-  ctx.fillRect(0, 0, W, H);
-
-  const topOverlay = ctx.createLinearGradient(0, 0, 0, H * 0.24);
-  topOverlay.addColorStop(0, "rgba(0,0,0,0.5)");
-  topOverlay.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = topOverlay;
-  ctx.fillRect(0, 0, W, H * 0.24);
-
-  await drawLogo(c, PAD, PAD, 60 * scale);
-
-  const maxTextWidth = W - PAD * 2;
-  ctx.font = `800 ${56 * scale}px ${font}`;
-  const headlineLines = wrapLines(ctx, opts.headline, maxTextWidth).slice(0, 3);
-  ctx.font = `400 ${32 * scale}px ${font}`;
-  let bodyLines = wrapLines(ctx, opts.corpo, maxTextWidth);
-
-  const minStartY = H * 0.4;
-  const blockHeightOf = (hl: number, bl: number) =>
-    KICKER_H + 40 * scale + hl * HEADLINE_LH + 16 * scale + bl * BODY_LH;
-  let blockHeight = blockHeightOf(headlineLines.length, bodyLines.length);
-  let startY = H - PAD - FOOTER_H - blockHeight;
-  while (startY < minStartY && bodyLines.length > 1) {
-    bodyLines = bodyLines.slice(0, -1);
-    blockHeight = blockHeightOf(headlineLines.length, bodyLines.length);
-    startY = H - PAD - FOOTER_H - blockHeight;
-  }
-  if (bodyLines.length < wrapLines(ctx, opts.corpo, maxTextWidth).length) {
-    const last = bodyLines[bodyLines.length - 1];
-    bodyLines = [...bodyLines.slice(0, -1), ensureEllipsis(ctx, last, maxTextWidth)];
-  }
-
-  let cursorY = Math.max(startY, H * 0.3);
-
-  ctx.font = `700 ${24 * scale}px ${font}`;
-  cursorY = drawKickerPill(ctx, opts.kicker, PAD, cursorY, KICKER_H, opts.accentColor, "#141414");
-  cursorY += 40 * scale;
-
-  ctx.font = `800 ${56 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  for (const line of headlineLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += HEADLINE_LH;
-  }
-  cursorY += 16 * scale;
-
-  ctx.font = `400 ${32 * scale}px ${font}`;
-  ctx.fillStyle = "rgba(255,255,255,0.88)";
-  for (const line of bodyLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += BODY_LH;
-  }
-
-  drawFooter(
-    c,
-    H - PAD - FOOTER_H + 24,
-    "#FFFFFF",
-    "rgba(255,255,255,0.65)",
-    "rgba(255,255,255,0.25)",
-  );
-}
-
-// --- Template 2: minimalista claro --------------------------------------
-
-async function drawMinimalClaro(c: Ctx2) {
-  const { ctx, W, H, font, scale, opts } = c;
-
-  const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, "#FAFAF8");
-  bg.addColorStop(1, shade(opts.accentColor, 85));
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  if (opts.backgroundDataUrl) {
-    try {
-      const img = await loadImage(opts.backgroundDataUrl);
-      const boxH = H * 0.42;
-      drawCover(ctx, img, 0, 0, W, boxH);
-      const fade = ctx.createLinearGradient(0, boxH * 0.55, 0, boxH);
-      fade.addColorStop(0, "rgba(250,250,248,0)");
-      fade.addColorStop(1, "#FAFAF8");
-      ctx.fillStyle = fade;
-      ctx.fillRect(0, 0, W, boxH);
-    } catch {
-      // sem foto legível, segue só com o degradê
-    }
-  }
-
-  await drawLogo(c, PAD, PAD, 56 * scale);
-
-  const maxTextWidth = W - PAD * 2;
-  let cursorY = H * 0.5;
-
-  ctx.font = `700 ${22 * scale}px ${font}`;
-  cursorY = drawKickerPill(ctx, opts.kicker, PAD, cursorY, 44 * scale, opts.accentColor, "#141414");
-  cursorY += 36 * scale;
-
-  ctx.font = `800 ${58 * scale}px ${font}`;
-  ctx.fillStyle = "#17181C";
-  const headlineLines = wrapLines(ctx, opts.headline, maxTextWidth).slice(0, 3);
-  for (const line of headlineLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += 66 * scale;
-  }
-  cursorY += 20 * scale;
-
-  const footerLineY = H - PAD - 96 + 24;
-  ctx.font = `400 ${32 * scale}px ${font}`;
-  ctx.fillStyle = "rgba(23,24,28,0.72)";
-  const bodyLH = 40 * scale;
-  const bodyLines = fitBody(ctx, opts.corpo, maxTextWidth, bodyLH, cursorY, footerLineY - 16);
-  for (const line of bodyLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += bodyLH;
-  }
-
-  drawFooter(c, footerLineY, "#17181C", "rgba(23,24,28,0.55)", "rgba(23,24,28,0.18)");
-}
-
-// --- Template 3: cartão centralizado ------------------------------------
-
-async function drawCartaoCentralizado(c: Ctx2) {
-  const { ctx, W, H, font, scale, opts } = c;
-
-  const bg = ctx.createLinearGradient(0, 0, W, H);
-  bg.addColorStop(0, shade(opts.accentColor, -10));
-  bg.addColorStop(1, shade(opts.accentColor, -45));
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  const midX = W / 2;
-  const maxTextWidth = W - PAD * 2.4;
-
-  ctx.textAlign = "center";
-  ctx.font = `700 ${22 * scale}px ${font}`;
-  const kickerText = opts.kicker.toUpperCase();
-  const kW = ctx.measureText(kickerText).width + 36 * scale;
-  const kH = 44 * scale;
-  roundRect(ctx, midX - kW / 2, H * 0.3, kW, kH, kH / 2);
-  ctx.fillStyle = "rgba(255,255,255,0.16)";
-  ctx.fill();
-  ctx.fillStyle = "#FFFFFF";
-  ctx.textBaseline = "middle";
-  ctx.fillText(kickerText, midX, H * 0.3 + kH / 2 + 1);
-  ctx.textBaseline = "alphabetic";
-
-  let cursorY = H * 0.3 + kH + 64 * scale;
-  ctx.font = `800 ${58 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  const headlineLines = wrapLines(ctx, opts.headline, maxTextWidth).slice(0, 3);
-  for (const line of headlineLines) {
-    ctx.fillText(line, midX, cursorY);
-    cursorY += 66 * scale;
-  }
-  cursorY += 20 * scale;
-
-  ctx.font = `400 ${30 * scale}px ${font}`;
-  ctx.fillStyle = "rgba(255,255,255,0.85)";
-  const bodyLH = 40 * scale;
-  const bodyLines = fitBody(ctx, opts.corpo, maxTextWidth, bodyLH, cursorY, H - PAD - 64);
-  for (const line of bodyLines) {
-    ctx.fillText(line, midX, cursorY);
-    cursorY += bodyLH;
-  }
-  ctx.textAlign = "left";
-
-  if (opts.logoDataUrl) {
-    try {
-      const logo = await loadImage(opts.logoDataUrl);
-      const logoH = 56 * scale;
-      const logoW = (logo.width / logo.height) * logoH;
-      ctx.drawImage(logo, midX - logoW / 2, PAD, logoW, logoH);
-    } catch {
-      // segue sem logo
-    }
-  }
-
-  ctx.textAlign = "center";
-  ctx.font = `600 ${26 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillText(opts.nomeEscritorio || "Seu Escritório", midX, H - PAD - 24);
-  if (opts.registro) {
-    ctx.font = `400 ${20 * scale}px ${font}`;
-    ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.fillText(opts.registro, midX, H - PAD + 8);
-  }
-  ctx.textAlign = "left";
-}
-
-// --- Template 4: diagonal ------------------------------------------------
-
-async function drawDiagonal(c: Ctx2) {
-  const { ctx, W, H, font, scale, opts } = c;
-  const splitX = W * 0.42;
-  const slant = 140;
-
-  if (opts.backgroundDataUrl) {
-    try {
-      drawCover(ctx, await loadImage(opts.backgroundDataUrl), 0, 0, W, H);
-    } catch {
-      drawGradientBackground(ctx, W, H, opts.accentColor);
-    }
-  } else {
-    drawGradientBackground(ctx, W, H, opts.accentColor);
-  }
-  const dim = ctx.createLinearGradient(0, 0, W, 0);
-  dim.addColorStop(0, "rgba(0,0,0,0.25)");
-  dim.addColorStop(1, "rgba(0,0,0,0.05)");
-  ctx.fillStyle = dim;
-  ctx.fillRect(0, 0, splitX + slant, H);
-
+// Ícones de "enviar" (avião de papel) e "salvar" (marcador) só pro slide
+// de fechamento - reforça visualmente o próprio texto do slide ("salve
+// esse post", "encaminhe pra quem precisa"), no mesmo traço fino/
+// arredondado dos ícones nativos do Instagram.
+function desenharIconeEnviar(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number, cor: string) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-Math.PI / 14);
+  ctx.strokeStyle = cor;
+  ctx.lineWidth = Math.max(2, s * 0.09);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.moveTo(splitX, 0);
-  ctx.lineTo(splitX + slant, 0);
-  ctx.lineTo(splitX + slant - slant, H);
-  ctx.lineTo(splitX - slant, H);
+  ctx.moveTo(-s * 0.5, s * 0.12);
+  ctx.lineTo(s * 0.48, -s * 0.46);
+  ctx.lineTo(s * 0.08, s * 0.46);
+  ctx.lineTo(-s * 0.04, s * 0.04);
   ctx.closePath();
-  ctx.fillStyle = shade(opts.accentColor, -20);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(splitX + slant, 0);
-  ctx.lineTo(W, 0);
-  ctx.lineTo(W, H);
-  ctx.lineTo(splitX - slant, H);
-  ctx.closePath();
-  ctx.fillStyle = shade(opts.accentColor, -20);
-  ctx.fill();
-
-  await drawLogo(c, PAD, PAD, 52 * scale);
-
-  const panelX = splitX + slant / 2 + 48;
-  const maxTextWidth = W - panelX - PAD * 0.6;
-  let cursorY = H * 0.32;
-
-  ctx.font = `700 ${20 * scale}px ${font}`;
-  cursorY = drawKickerPill(ctx, opts.kicker, panelX, cursorY, 40 * scale, "#FFFFFF", "#141414");
-  cursorY += 36 * scale;
-
-  ctx.font = `800 ${44 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  const headlineLines = wrapLines(ctx, opts.headline, maxTextWidth).slice(0, 4);
-  for (const line of headlineLines) {
-    ctx.fillText(line, panelX, cursorY);
-    cursorY += 52 * scale;
-  }
-  cursorY += 16 * scale;
-
-  const footerY = H - PAD - 96 + 24;
-  ctx.font = `400 ${26 * scale}px ${font}`;
-  ctx.fillStyle = "rgba(255,255,255,0.85)";
-  const bodyLH = 34 * scale;
-  const bodyLines = fitBody(ctx, opts.corpo, maxTextWidth, bodyLH, cursorY, footerY - 16);
-  for (const line of bodyLines) {
-    ctx.fillText(line, panelX, cursorY);
-    cursorY += bodyLH;
-  }
-  ctx.strokeStyle = "rgba(255,255,255,0.3)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(panelX, footerY);
-  ctx.lineTo(W - PAD, footerY);
   ctx.stroke();
-  ctx.font = `600 ${24 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillText(opts.nomeEscritorio || "Seu Escritório", panelX, footerY + 38);
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.04, s * 0.04);
+  ctx.lineTo(s * 0.48, -s * 0.46);
+  ctx.stroke();
+  ctx.restore();
 }
 
-// --- Template 5: faixa superior ------------------------------------------
+function desenharIconeSalvar(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number, cor: string) {
+  ctx.save();
+  ctx.strokeStyle = cor;
+  ctx.lineWidth = Math.max(2, s * 0.09);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.32, cy - s * 0.42);
+  ctx.lineTo(cx - s * 0.32, cy + s * 0.42);
+  ctx.lineTo(cx, cy + s * 0.16);
+  ctx.lineTo(cx + s * 0.32, cy + s * 0.42);
+  ctx.lineTo(cx + s * 0.32, cy - s * 0.42);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
 
-async function drawFaixaSuperior(c: Ctx2) {
-  const { ctx, W, H, font, scale, opts } = c;
-  const splitY = H * 0.44;
+// Ícone de "compartilhar" (caixa com seta pra cima, o glifo universal de
+// exportar/compartilhar) - deliberadamente diferente do avião de papel
+// (encaminhar/DM) e do marcador (salvar), pra não repetir o mesmo ícone
+// com dois nomes diferentes no rodapé do fechamento.
+function desenharIconeCompartilhar(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number, cor: string) {
+  ctx.save();
+  ctx.strokeStyle = cor;
+  ctx.lineWidth = Math.max(2, s * 0.09);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.34, cy - s * 0.02);
+  ctx.lineTo(cx - s * 0.34, cy + s * 0.42);
+  ctx.lineTo(cx + s * 0.34, cy + s * 0.42);
+  ctx.lineTo(cx + s * 0.34, cy - s * 0.02);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + s * 0.14);
+  ctx.lineTo(cx, cy - s * 0.46);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.2, cy - s * 0.26);
+  ctx.lineTo(cx, cy - s * 0.46);
+  ctx.lineTo(cx + s * 0.2, cy - s * 0.26);
+  ctx.stroke();
+  ctx.restore();
+}
 
-  if (opts.backgroundDataUrl) {
-    try {
-      drawCover(ctx, await loadImage(opts.backgroundDataUrl), 0, 0, W, splitY);
-    } catch {
-      drawGradientBackground(ctx, W, splitY, opts.accentColor);
+function formatarNumeroBarra(v: number): string {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+// Sem card/fundo atrás - o card genérico destoava demais da linguagem
+// visual do resto do post (kicker/título/corpo já convivem direto com a
+// foto, só com a mesma sombra suave de sempre). Aqui usa exatamente a
+// mesma fonte de destaque do título (fonteNumeroFamily/Peso) pros
+// números - o elemento tem que parecer parte do mesmo post, não um
+// widget colado por cima. Um traço curto na cor de destaque assina cada
+// variação como "dado" (mesmo papel visual em todas, sem precisar de
+// caixa). Devolve a altura usada, só informativo pra quem chama.
+function desenharElementoVisual(
+  ctx: CanvasRenderingContext2D,
+  elemento: ElementoVisualSlide,
+  x: number,
+  y: number,
+  largura: number,
+  corDestaque: string,
+  corTexto: string,
+  corTextoSecundario: string,
+  font: string,
+  fonteNumeroFamily: string,
+  fonteNumeroPeso: number,
+): number {
+  const altura = alturaElementoVisual(elemento);
+  ctx.save();
+  // Sombra discreta (não um cartão elevado) - o Sistema de Design ATLAS
+  // define os gráficos como "traço fino editorial, sem cartão de fundo"
+  // (ver design_system/schema.py::GraficoTokens), então a legibilidade
+  // sobre a foto vem só do contraste do texto, não de um efeito de UI.
+  ctx.shadowColor = "rgba(0,0,0,0.35)";
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 1;
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = corDestaque;
+  ctx.fillRect(x, y, 40, 3);
+  const topo = y + 22;
+
+  switch (elemento.tipo) {
+    case "numero_destaque": {
+      ctx.font = `${fonteNumeroPeso} 48px ${fonteNumeroFamily}`;
+      ctx.fillStyle = corDestaque;
+      ctx.fillText(elemento.valor, x, topo + 40);
+      ctx.font = `600 17px ${font}`;
+      ctx.fillStyle = corTextoSecundario;
+      wrapLines(ctx, elemento.rotulo.toUpperCase(), largura)
+        .slice(0, 2)
+        .forEach((linha, i) => {
+          ctx.fillText(linha, x, topo + 68 + i * 23);
+        });
+      break;
     }
-  } else {
-    drawGradientBackground(ctx, W, splitY, opts.accentColor);
+    case "grafico_barra": {
+      const itens = elemento.itens.slice(0, 4);
+      const max = Math.max(...itens.map((i) => Math.abs(i.valor)), 1);
+      const barW = largura - 56;
+      let cy = topo;
+      for (const item of itens) {
+        ctx.font = `700 15px ${font}`;
+        ctx.fillStyle = corTextoSecundario;
+        ctx.fillText(item.rotulo.toUpperCase(), x, cy);
+        ctx.textAlign = "right";
+        ctx.font = `700 15px ${font}`;
+        ctx.fillStyle = corTexto;
+        ctx.fillText(formatarNumeroBarra(item.valor), x + largura, cy);
+        ctx.textAlign = "left";
+        const barY = cy + 9;
+        ctx.fillStyle = "rgba(255,255,255,0.18)";
+        ctx.fillRect(x, barY, barW, 4);
+        const w = Math.max(6, (Math.abs(item.valor) / max) * barW);
+        ctx.fillStyle = corDestaque;
+        ctx.fillRect(x, barY, w, 4);
+        cy += 42;
+      }
+      break;
+    }
+    case "grafico_rosca": {
+      const r = 40;
+      const cx = x + r + 2;
+      const cyC = topo + r - 8;
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.beginPath();
+      ctx.arc(cx, cyC, r, 0, Math.PI * 2);
+      ctx.stroke();
+      const pct = Math.min(100, Math.max(0, elemento.percentual));
+      ctx.strokeStyle = corDestaque;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.arc(cx, cyC, r, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * pct) / 100);
+      ctx.stroke();
+      ctx.lineCap = "butt";
+      ctx.textAlign = "center";
+      ctx.font = `${fonteNumeroPeso} 22px ${fonteNumeroFamily}`;
+      ctx.fillStyle = corTexto;
+      ctx.fillText(`${Math.round(pct)}%`, cx, cyC + 7);
+      ctx.textAlign = "left";
+      ctx.font = `600 15px ${font}`;
+      ctx.fillStyle = corTextoSecundario;
+      const larguraLabel = largura - (r * 2 + 18);
+      wrapLines(ctx, elemento.rotulo.toUpperCase(), larguraLabel)
+        .slice(0, 3)
+        .forEach((linha, i) => {
+          ctx.fillText(linha, cx + r + 18, topo + 8 + i * 21);
+        });
+      break;
+    }
+    case "comparacao": {
+      const metade = largura / 2;
+      const lado = (ox: number, item: { rotulo: string; valor: string }) => {
+        ctx.font = `${fonteNumeroPeso} 30px ${fonteNumeroFamily}`;
+        ctx.fillStyle = corTexto;
+        ctx.fillText(item.valor, x + ox, topo + 28);
+        ctx.font = `700 13px ${font}`;
+        ctx.fillStyle = corTextoSecundario;
+        ctx.fillText(item.rotulo.toUpperCase(), x + ox, topo + 50);
+      };
+      lado(0, elemento.antes);
+      ctx.font = `600 22px ${font}`;
+      ctx.fillStyle = corDestaque;
+      ctx.fillText("→", x + metade - 6, topo + 27);
+      lado(metade + 22, elemento.depois);
+      break;
+    }
   }
-  const topDim = ctx.createLinearGradient(0, 0, 0, splitY);
-  topDim.addColorStop(0, "rgba(0,0,0,0.35)");
-  topDim.addColorStop(1, "rgba(0,0,0,0.05)");
-  ctx.fillStyle = topDim;
-  ctx.fillRect(0, 0, W, splitY);
 
-  ctx.fillStyle = "#141518";
-  ctx.fillRect(0, splitY, W, H - splitY);
-
-  await drawLogo(c, PAD, PAD, 52 * scale);
-
-  const maxTextWidth = W - PAD * 2;
-  let cursorY = splitY - 40 * scale;
-  ctx.font = `700 ${22 * scale}px ${font}`;
-  drawKickerPill(ctx, opts.kicker, PAD, cursorY, 44 * scale, opts.accentColor, "#141414");
-
-  cursorY = splitY + 64 * scale;
-  ctx.font = `800 ${48 * scale}px ${font}`;
-  ctx.fillStyle = "#FFFFFF";
-  const headlineLines = wrapLines(ctx, opts.headline, maxTextWidth).slice(0, 2);
-  for (const line of headlineLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += 56 * scale;
-  }
-  cursorY += 16 * scale;
-
-  const footerLineY = H - PAD - 96 + 24;
-  ctx.font = `400 ${28 * scale}px ${font}`;
-  ctx.fillStyle = "rgba(255,255,255,0.85)";
-  const bodyLH = 36 * scale;
-  const bodyLines = fitBody(ctx, opts.corpo, maxTextWidth, bodyLH, cursorY, footerLineY - 16);
-  for (const line of bodyLines) {
-    ctx.fillText(line, PAD, cursorY);
-    cursorY += bodyLH;
-  }
-
-  drawFooter(c, footerLineY, "#FFFFFF", "rgba(255,255,255,0.6)", "rgba(255,255,255,0.2)");
-}
-
-// --- helpers compartilhados ----------------------------------------------
-
-async function drawLogo(c: Ctx2, x: number, y: number, logoH: number) {
-  if (!c.opts.logoDataUrl) return;
-  try {
-    const logo = await loadImage(c.opts.logoDataUrl);
-    const logoW = (logo.width / logo.height) * logoH;
-    c.ctx.drawImage(logo, x, y, logoW, logoH);
-  } catch {
-    // logo corrompida/ilegível: segue sem travar o resto da arte
-  }
+  ctx.restore();
+  ctx.textAlign = "left";
+  return altura;
 }
 
 // Estilos de destaque (rótulo, título e corpo) inspirados nos stickers de
@@ -548,6 +377,39 @@ async function drawLogo(c: Ctx2, x: number, y: number, logoH: number) {
 // onde aplicar, não é fixo no rótulo).
 export type KickerEstiloId = "solido" | "contorno" | "grifado" | "sublinhado";
 export type EstiloDestaqueId = KickerEstiloId | "nenhum";
+
+// Posição livre de cada texto - o usuário arrasta rótulo/título/corpo/
+// rodapé pra qualquer lugar da imagem, cada um independente dos outros.
+// xPct/yPct são frações (0-1) da largura/altura do canvas, não pixels
+// fixos, pra funcionar igual em qualquer resolução de exportação.
+export type PapelTexto = "rotulo" | "titulo" | "corpo" | "rodape";
+// A logo e o card de número/gráfico usam o mesmo mecanismo de posição
+// livre dos textos (arrastar sobre o canvas), por isso entram na mesma
+// chave de posições - nenhum dos dois é um PapelTexto de verdade (não têm
+// conteúdo textual gerado pela IA), mas reaproveitar a estrutura evita
+// duplicar todo o sistema de arrasto.
+export type ChaveArrasto = PapelTexto | "logo" | "grafico";
+export interface PosicaoTexto {
+  xPct: number;
+  yPct: number;
+  // Só a logo usa - fator de tamanho livre (1 = tamanho padrão do
+  // template). Arrastar a alça de redimensionar muda isso; texto ignora.
+  escala?: number;
+  // Só a logo usa - largura/altura efetivas (fração do canvas) do último
+  // desenho, pra UI saber exatamente onde pousar a alça de redimensionar
+  // (o canto real da logo, não uma estimativa).
+  larguraPct?: number;
+  alturaPct?: number;
+}
+export type PosicoesTexto = Partial<Record<ChaveArrasto, PosicaoTexto>>;
+
+export const ESCALA_LOGO_PADRAO = 1;
+export const ESCALA_LOGO_MIN = 0.5;
+export const ESCALA_LOGO_MAX = 2.5;
+
+export const ESCALA_GRAFICO_PADRAO = 1;
+export const ESCALA_GRAFICO_MIN = 0.6;
+export const ESCALA_GRAFICO_MAX = 1.8;
 
 export const KICKER_ESTILOS: { id: KickerEstiloId; label: string }[] = [
   { id: "solido", label: "Sólido" },
@@ -623,88 +485,53 @@ function drawKickerPill(
   bg: string,
   fg: string,
   estilo: KickerEstiloId = "solido",
+  align: CanvasTextAlign = "left",
 ): number {
   const padX = 18;
   const upper = text.toUpperCase();
   const w = ctx.measureText(upper).width + padX * 2;
+  // `x` é o ponto de ancoragem (esquerda/centro/direita, igual ao resto
+  // dos textos) - a pílula sempre desenha da esquerda pra direita
+  // internamente, então o alinhamento só desloca onde essa borda esquerda
+  // cai, igual desenharFundoAtrasTexto faz pro título/corpo.
+  const drawX = align === "right" ? x - w : align === "center" ? x - w / 2 : x;
   ctx.textBaseline = "middle";
 
   if (estilo === "contorno") {
-    roundRect(ctx, x, y, w, h, h / 2);
+    roundRect(ctx, drawX, y, w, h, h / 2);
     ctx.lineWidth = 2;
     ctx.strokeStyle = bg;
     ctx.stroke();
     ctx.fillStyle = bg;
-    ctx.fillText(upper, x + padX, y + h / 2 + 1);
+    ctx.fillText(upper, drawX + padX, y + h / 2 + 1);
   } else if (estilo === "grifado") {
     // "Marcador de texto": bloco reto (cantos quase retos, não pílula) bem
     // preenchido atrás do texto - o "grifado/preenchido" pedido.
-    roundRect(ctx, x, y, w, h, 4);
+    roundRect(ctx, drawX, y, w, h, 4);
     ctx.fillStyle = bg;
     ctx.fill();
     ctx.fillStyle = fg;
-    ctx.fillText(upper, x + padX, y + h / 2 + 1);
+    ctx.fillText(upper, drawX + padX, y + h / 2 + 1);
   } else if (estilo === "sublinhado") {
     ctx.fillStyle = bg;
-    ctx.fillText(upper, x, y + h / 2 + 1);
+    ctx.fillText(upper, drawX, y + h / 2 + 1);
     const textW = ctx.measureText(upper).width;
     ctx.strokeStyle = bg;
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(x, y + h - 2);
-    ctx.lineTo(x + textW, y + h - 2);
+    ctx.moveTo(drawX, y + h - 2);
+    ctx.lineTo(drawX + textW, y + h - 2);
     ctx.stroke();
   } else {
-    roundRect(ctx, x, y, w, h, h / 2);
+    roundRect(ctx, drawX, y, w, h, h / 2);
     ctx.fillStyle = bg;
     ctx.fill();
     ctx.fillStyle = fg;
-    ctx.fillText(upper, x + padX, y + h / 2 + 1);
+    ctx.fillText(upper, drawX + padX, y + h / 2 + 1);
   }
 
   ctx.textBaseline = "alphabetic";
   return y + h;
-}
-
-function drawFooter(
-  c: Ctx2,
-  lineY: number,
-  nameColor: string,
-  regColor: string,
-  lineColor: string,
-) {
-  const { ctx, W, opts, font, scale } = c;
-  ctx.strokeStyle = lineColor;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(PAD, lineY);
-  ctx.lineTo(W - PAD, lineY);
-  ctx.stroke();
-
-  ctx.font = `600 ${26 * scale}px ${font}`;
-  ctx.fillStyle = nameColor;
-  ctx.fillText(opts.nomeEscritorio || "Seu Escritório", PAD, lineY + 40);
-
-  if (opts.registro) {
-    ctx.font = `400 ${22 * scale}px ${font}`;
-    ctx.fillStyle = regColor;
-    const regW = ctx.measureText(opts.registro).width;
-    ctx.fillText(opts.registro, W - PAD - regW, lineY + 40);
-  }
-}
-
-function drawGradientBackground(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  accent: string,
-) {
-  const g = ctx.createLinearGradient(0, 0, w, h);
-  g.addColorStop(0, shade(accent, -55));
-  g.addColorStop(0.55, shade(accent, -75));
-  g.addColorStop(1, "#0c0c0e");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, w, h);
 }
 
 function shade(hex: string, percent: number): string {
@@ -821,6 +648,96 @@ function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number
   return lines;
 }
 
+// --- Cor por palavra (título/corpo) --------------------------------------
+// Cada palavra do título e do corpo pode ter sua própria cor - por
+// destaque automático da IA (números/dados reais, ver
+// ai/carrossel.py -> destaquesTitulo/destaquesCorpo) ou por escolha
+// manual do usuário (arrastando... clicando na palavra, ver
+// ModelosVisuaisPainel/InstagramWorkspace). As duas fontes usam o mesmo
+// índice: a posição da palavra dentro do texto completo (não da linha
+// já quebrada), pra sobreviver ao wrapLines sem perder a referência.
+
+export function tokenizarPalavras(texto: string): string[] {
+  return texto.split(/\s+/).filter(Boolean);
+}
+
+function normalizarPalavra(p: string): string {
+  return p.toLowerCase().replace(/[.,;:!?"'()]/g, "");
+}
+
+export function calcularCoresPalavras(
+  palavras: string[],
+  destaques: string[] | undefined,
+  overrides: Record<number, string> | undefined,
+  corDestaque: string,
+): Record<number, string> {
+  const resultado: Record<number, string> = {};
+  if (destaques?.length) {
+    const normPalavras = palavras.map(normalizarPalavra);
+    for (const destaque of destaques) {
+      const destaquePalavras = tokenizarPalavras(destaque).map(normalizarPalavra);
+      if (!destaquePalavras.length) continue;
+      for (let i = 0; i <= normPalavras.length - destaquePalavras.length; i++) {
+        let bate = true;
+        for (let j = 0; j < destaquePalavras.length; j++) {
+          if (normPalavras[i + j] !== destaquePalavras[j]) {
+            bate = false;
+            break;
+          }
+        }
+        if (bate) {
+          for (let j = 0; j < destaquePalavras.length; j++) resultado[i + j] = corDestaque;
+        }
+      }
+    }
+  }
+  if (overrides) {
+    for (const chave of Object.keys(overrides)) {
+      resultado[Number(chave)] = overrides[Number(chave)];
+    }
+  }
+  return resultado;
+}
+
+// Desenha uma linha já quebrada com uma cor por palavra - reposiciona
+// manualmente porque ctx.textAlign nativo só permite uma cor por
+// fillText. indiceInicial é o índice global (no texto completo, não só
+// nessa linha) da primeira palavra da linha, pra achar a cor certa de
+// cada uma em `cores`.
+function desenharLinhaColorida(
+  ctx: CanvasRenderingContext2D,
+  linha: string,
+  indiceInicial: number,
+  cores: Record<number, string>,
+  x: number,
+  y: number,
+  align: CanvasTextAlign,
+  corPadrao: string,
+): void {
+  const palavras = linha.split(" ").filter(Boolean);
+  if (palavras.length === 0) return;
+  const espacoW = ctx.measureText(" ").width;
+  const larguras = palavras.map((p) => ctx.measureText(p).width);
+  const larguraTotal = larguras.reduce((a, b) => a + b, 0) + espacoW * (palavras.length - 1);
+  let cursorX = x;
+  if (align === "center") cursorX = x - larguraTotal / 2;
+  else if (align === "right") cursorX = x - larguraTotal;
+
+  const alignAnterior = ctx.textAlign;
+  ctx.textAlign = "left";
+  palavras.forEach((palavra, i) => {
+    ctx.fillStyle = cores[indiceInicial + i] ?? corPadrao;
+    ctx.fillText(palavra, cursorX, y);
+    cursorX += larguras[i] + espacoW;
+  });
+  ctx.textAlign = alignAnterior;
+}
+
+// Desenha um bloco de linhas já quebradas (título ou corpo) com cor por
+// palavra, avançando lineHeight a cada linha - usado pelos 5 templates do
+// motor legado (o motor moderno tem o próprio loop, com fonte/estilo por
+// texto mais rico). Devolve quantas palavras foram desenhadas, pro
+// chamador continuar o índice global corretamente no próximo bloco.
 function drawCover(
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement,
@@ -855,14 +772,176 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+function distanciaCor(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
+  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
+}
+
+// Luminância média (0-1) de um bloco de pixels - usada tanto pro fundo sob
+// a logo quanto pra própria logo, pra decidir se a regra "auto" de
+// contraste precisa entrar em ação (ver desenharLogoComContraste). Quando
+// `soAlfaVisivel` é true, ignora pixels quase transparentes (função pra
+// medir a logo em si, não a área retangular ao redor dela).
+function luminanciaMediaPixels(data: Uint8ClampedArray, soAlfaVisivel: boolean): number {
+  let total = 0;
+  let n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (soAlfaVisivel && data[i + 3] < 32) continue;
+    total += (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) / 255;
+    n++;
+  }
+  return n > 0 ? total / n : 0.5;
+}
+
+// null = não deu pra medir (ex: canvas contaminado por imagem de outra
+// origem) - o chamador trata null como "sem sinal", nunca como um valor
+// de luminância de verdade, pra nunca decidir a regra de contraste com
+// base numa leitura inventada.
+function luminanciaFundoSobRetangulo(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  W: number,
+  H: number,
+): number | null {
+  const ix = Math.max(0, Math.round(x));
+  const iy = Math.max(0, Math.round(y));
+  const iw = Math.max(1, Math.min(Math.round(w), W - ix));
+  const ih = Math.max(1, Math.min(Math.round(h), H - iy));
+  try {
+    return luminanciaMediaPixels(ctx.getImageData(ix, iy, iw, ih).data, false);
+  } catch {
+    return null;
+  }
+}
+
+async function luminanciaDaImagem(img: HTMLImageElement): Promise<number | null> {
+  const off = document.createElement("canvas");
+  const tam = 48;
+  off.width = tam;
+  off.height = tam;
+  const octx = off.getContext("2d");
+  if (!octx) return null;
+  try {
+    octx.drawImage(img, 0, 0, tam, tam);
+    return luminanciaMediaPixels(octx.getImageData(0, 0, tam, tam).data, true);
+  } catch {
+    return null;
+  }
+}
+
+// Remove o fundo sólido/uniforme de uma logo (a maioria das logos de
+// escritório é um emblema com fundo liso, não um PNG já transparente) -
+// sem isso, mesmo sem plaqueta desenhada por trás, a logo continua
+// parecendo um adesivo quadrado colado sobre a foto. Roda uma vez, no
+// upload (não a cada render): amostra a cor das bordas da imagem, e só
+// se ela for uniforme (provável fundo liso, não uma foto/textura), faz
+// um "flood fill" a partir das bordas removendo tudo que for parecido
+// com essa cor e estiver conectado à borda - preserva furos internos do
+// próprio desenho da logo (não é uma remoção de cor global) e nunca mexe
+// em logos que já vieram com fundo transparente ou que são fotográficas.
+export async function removerFundoLogo(dataUrl: string): Promise<string> {
+  try {
+    const img = await loadImage(dataUrl);
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    if (!w || !h || w * h > 4_000_000) return dataUrl;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const { data } = imageData;
+    const idx = (x: number, y: number) => (y * w + x) * 4;
+
+    const bordas: number[] = [];
+    for (let x = 0; x < w; x++) {
+      bordas.push(idx(x, 0), idx(x, h - 1));
+    }
+    for (let y = 0; y < h; y++) {
+      bordas.push(idx(0, y), idx(w - 1, y));
+    }
+
+    // já tem transparência de verdade na borda (PNG já cortado) - não mexe
+    const alphaMedioBorda = bordas.reduce((s, i) => s + data[i + 3], 0) / bordas.length;
+    if (alphaMedioBorda < 200) return dataUrl;
+
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (const i of bordas) {
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+    }
+    r /= bordas.length;
+    g /= bordas.length;
+    b /= bordas.length;
+
+    const distMedia =
+      bordas.reduce((s, i) => s + distanciaCor(data[i], data[i + 1], data[i + 2], r, g, b), 0) /
+      bordas.length;
+    // borda não é uniforme (provável foto/textura na própria logo) - não arrisca cortar
+    if (distMedia > 18) return dataUrl;
+
+    const LIMIAR = 40;
+    const LIMIAR_FEATHER = 65;
+    const visitado = new Uint8Array(w * h);
+    const fila: number[] = [];
+    for (let x = 0; x < w; x++) {
+      fila.push(x, (h - 1) * w + x);
+    }
+    for (let y = 0; y < h; y++) {
+      fila.push(y * w, y * w + w - 1);
+    }
+
+    let cabeca = 0;
+    while (cabeca < fila.length) {
+      const p = fila[cabeca++];
+      if (visitado[p]) continue;
+      visitado[p] = 1;
+      const px = p % w;
+      const py = (p / w) | 0;
+      const i = p * 4;
+      const d = distanciaCor(data[i], data[i + 1], data[i + 2], r, g, b);
+      if (d > LIMIAR_FEATHER) continue;
+      const fatorAlpha = d <= LIMIAR ? 0 : (d - LIMIAR) / (LIMIAR_FEATHER - LIMIAR);
+      data[i + 3] = Math.round(data[i + 3] * fatorAlpha);
+      if (px > 0) fila.push(p - 1);
+      if (px < w - 1) fila.push(p + 1);
+      if (py > 0) fila.push(p - w);
+      if (py < h - 1) fila.push(p + w);
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return dataUrl;
+  }
+}
+
 // ===========================================================================
-// Estúdio Visual: renderização dirigida por um perfil visual extraído das
-// referências do cliente (ver ai/perfil_visual.py no backend), em vez de um
-// dos 5 templates fixos acima. Bloco totalmente separado do resto do
-// arquivo - não altera nem depende de renderInstagramPost/TemplateId, só
-// reaproveita os helpers de desenho já existentes (wrapLines, drawCover,
-// fitBody, shade, drawKickerPill etc.) pra não duplicar lógica.
+// Motor moderno: renderização dirigida por um perfil visual (ver
+// PerfilVisual abaixo) em vez de um algoritmo de desenho fixo por
+// template - usado pelo carrossel, Estúdio Visual e Notícias (ver
+// design_system/extracao.py e design_system/adapters.py no backend, e
+// PERFIS_NOTICIAS mais abaixo). Reaproveita os helpers de desenho já
+// existentes (wrapLines, drawCover, fitBody, shade, drawKickerPill etc.)
+// pra não duplicar lógica.
 // ===========================================================================
+
+// Mesmos ids de design_system/schema.py::RegraContrasteLogo - "sombra" é o
+// tratamento único que a ATLAS sempre teve (sombra suave, sem plaqueta);
+// "chapa-escura"/"chapa-clara" forçam uma plaqueta atrás da logo
+// independente do fundo; "auto" (padrão quando o campo não vem) mede o
+// fundo sob a logo e a própria logo em tempo de render e só liga a
+// plaqueta quando os dois têm luminância parecida o bastante pra a logo
+// sumir sem ela (ver desenharLogoComContraste).
+export type RegraContrasteLogo = "sombra" | "chapa-escura" | "chapa-clara" | "auto";
 
 export interface PerfilVisual {
   logoPosicao:
@@ -872,7 +951,20 @@ export interface PerfilVisual {
     | "inferior-esquerda"
     | "inferior-direita"
     | "inferior-centro";
-  tituloAlinhamento: "esquerda" | "centro" | "direita";
+  // Tamanho da logo relativo ao padrão (1 = padrão), extraído das
+  // referências do cliente - mesma escala usada pela alça de
+  // redimensionar (ver ESCALA_LOGO_*). Vale só quando o usuário ainda
+  // não arrastou/redimensionou a logo manualmente nesse post.
+  logoEscala: number;
+  // Regra de contraste da logo (ver design_system/schema.py::LogoRegras) -
+  // opcional: undefined tem o mesmo efeito que "auto" (comportamento
+  // seguro por padrão pra qualquer chamador que não mande esse campo).
+  logoContraste?: RegraContrasteLogo;
+  // Área segura da logo em px (ver design_system/schema.py::LogoRegras) -
+  // espaço mínimo entre a logo e a plaqueta de contraste quando ela existe.
+  // undefined cai no mesmo padrão de 24px do Sistema de Design ATLAS.
+  logoAreaSeguraPx?: number;
+  tituloAlinhamento: AlinhamentoTexto;
   tituloPosicaoVertical: "superior" | "centro" | "inferior";
   tituloCaixaAlta: boolean;
   corPrimaria: string;
@@ -881,9 +973,137 @@ export interface PerfilVisual {
   fundoTipo: "foto" | "cor_solida" | "gradiente";
   imagemProporcao: number;
   temFaixaRodape: boolean;
+  // Fonte de destaque e estilos de rótulo/título/corpo extraídos das
+  // referências - réplica fiel da tipografia, não só da paleta/layout.
+  fonteDestaque: FonteDestaqueId;
+  kickerEstilo: KickerEstiloId;
+  estiloTitulo: EstiloDestaqueId;
+  estiloCorpo: EstiloDestaqueId;
   estiloGeral: string;
   observacoes: string;
 }
+
+// Sucessor dos 5 templates do motor legado (aposentado na fase 5 do plano
+// de arquitetura) pras Notícias: a variedade que antes vinha de 5
+// algoritmos de desenho separados agora vem de 5 perfis do Sistema de
+// Design, todos desenhados pelo MESMO motor (renderPostComModelo) - unifica a arquitetura sem
+// perder a sensação de "5 visuais diferentes" que o advogado já conhece.
+// Os ids batem exatamente com TemplateId/TEMPLATES acima (mesmo contrato
+// que ai/social_post.py já valida em "estilo.template" via chat - "fundo
+// azul" etc continua funcionando igual, como um corDestaque por cima do
+// perfil escolhido, não como parte dele).
+//
+// "diagonal" é o único sem equivalente literal: o motor novo não desenha
+// painéis geométricos, então a identidade dele foi reinterpretada como
+// par de cores forte + destaque grifado, não uma cópia pixel a pixel do
+// template antigo.
+export const PERFIS_NOTICIAS: Record<TemplateId, PerfilVisual> = {
+  "editorial-escuro": {
+    logoPosicao: "superior-esquerda",
+    logoEscala: 1,
+    logoContraste: "auto",
+    logoAreaSeguraPx: 24,
+    tituloAlinhamento: "esquerda",
+    tituloPosicaoVertical: "inferior",
+    tituloCaixaAlta: false,
+    corPrimaria: "#D9A544",
+    corSecundaria: null,
+    corFundo: "#0B0D12",
+    fundoTipo: "foto",
+    imagemProporcao: 1,
+    temFaixaRodape: false,
+    fonteDestaque: "inter",
+    kickerEstilo: "solido",
+    estiloTitulo: "nenhum",
+    estiloCorpo: "nenhum",
+    estiloGeral: "editorial escuro",
+    observacoes: "",
+  },
+  "minimal-claro": {
+    logoPosicao: "superior-esquerda",
+    logoEscala: 0.9,
+    logoContraste: "auto",
+    logoAreaSeguraPx: 24,
+    tituloAlinhamento: "esquerda",
+    tituloPosicaoVertical: "superior",
+    tituloCaixaAlta: false,
+    corPrimaria: "#B4532F",
+    corSecundaria: null,
+    corFundo: "#FAFAF8",
+    fundoTipo: "foto",
+    imagemProporcao: 0.42,
+    temFaixaRodape: false,
+    fonteDestaque: "poppins",
+    kickerEstilo: "solido",
+    estiloTitulo: "nenhum",
+    estiloCorpo: "nenhum",
+    estiloGeral: "minimalista claro",
+    observacoes: "",
+  },
+  "cartao-centralizado": {
+    logoPosicao: "superior-centro",
+    logoEscala: 1,
+    logoContraste: "auto",
+    logoAreaSeguraPx: 24,
+    tituloAlinhamento: "centro",
+    tituloPosicaoVertical: "centro",
+    tituloCaixaAlta: false,
+    corPrimaria: "#4FA3D1",
+    corSecundaria: null,
+    corFundo: "#0F1B2B",
+    fundoTipo: "cor_solida",
+    imagemProporcao: 0,
+    temFaixaRodape: false,
+    fonteDestaque: "archivo-black",
+    kickerEstilo: "solido",
+    estiloTitulo: "sublinhado",
+    estiloCorpo: "nenhum",
+    estiloGeral: "cartão centralizado",
+    observacoes: "",
+  },
+  diagonal: {
+    logoPosicao: "superior-direita",
+    logoEscala: 1,
+    logoContraste: "auto",
+    logoAreaSeguraPx: 24,
+    tituloAlinhamento: "esquerda",
+    tituloPosicaoVertical: "inferior",
+    tituloCaixaAlta: false,
+    corPrimaria: "#E0592B",
+    corSecundaria: "#1B2430",
+    corFundo: "#161B22",
+    fundoTipo: "foto",
+    imagemProporcao: 0.55,
+    temFaixaRodape: false,
+    fonteDestaque: "league-spartan",
+    kickerEstilo: "grifado",
+    estiloTitulo: "grifado",
+    estiloCorpo: "nenhum",
+    estiloGeral: "moderno vibrante",
+    observacoes: "",
+  },
+  "faixa-superior": {
+    logoPosicao: "superior-esquerda",
+    logoEscala: 1,
+    logoContraste: "auto",
+    logoAreaSeguraPx: 24,
+    tituloAlinhamento: "esquerda",
+    tituloPosicaoVertical: "superior",
+    tituloCaixaAlta: true,
+    corPrimaria: "#BF9B30",
+    corSecundaria: null,
+    corFundo: "#141110",
+    fundoTipo: "foto",
+    imagemProporcao: 0.48,
+    temFaixaRodape: true,
+    fonteDestaque: "bebas-neue",
+    kickerEstilo: "sublinhado",
+    estiloTitulo: "nenhum",
+    estiloCorpo: "nenhum",
+    estiloGeral: "editorial jornalístico",
+    observacoes: "",
+  },
+};
 
 export interface RenderModeloOptions {
   width: number;
@@ -911,15 +1131,71 @@ export interface RenderModeloOptions {
   kickerEstilo?: KickerEstiloId;
   estiloTitulo?: EstiloDestaqueId;
   estiloCorpo?: EstiloDestaqueId;
-  // Tamanho do texto (rótulo/título/corpo, proporcional) - opcional, cai
-  // em "media" (escala 1x, o tamanho de sempre) se não for informado.
-  escalaFonte?: FontScale;
+  // Tamanho de cada texto, independente - ver TAMANHOS_FONTE. Cada um cai
+  // em TAMANHO_FONTE_PADRAO (o tamanho de sempre) se não for informado.
+  tamanhoRotulo?: number;
+  tamanhoTitulo?: number;
+  tamanhoCorpo?: number;
+  tamanhoRodape?: number;
   // Cor usada nos destaques (fundo do rótulo e de título/corpo quando têm
   // estilo "sólido"/"grifado"/"contorno"/"sublinhado") - opcional, cai na
   // cor primária do perfil visual extraído das referências se não for
   // informada (comportamento de sempre).
   corDestaque?: string;
+  // Posição livre por texto - quando um papel tem posição aqui, ela vale
+  // no lugar da posição calculada automaticamente pro layout do perfil.
+  // Cada texto que não tiver entrada aqui continua na posição de sempre.
+  posicoes?: PosicoesTexto;
+  // Card de número em destaque ou gráfico (barra/rosca/comparação) - só
+  // desenhado quando presente, a partir de dado real extraído do
+  // conteúdo (ver ai/carrossel.py). null/undefined = nenhum elemento.
+  elementoVisual?: ElementoVisualSlide | null;
+  // Trechos do título/corpo que a IA identificou como número/dado
+  // relevante (psicologia da atenção - ver ai/carrossel.py) e que por
+  // isso ganham a cor de destaque automaticamente. Cada item precisa ser
+  // um trecho exato do texto correspondente.
+  destaquesTitulo?: string[];
+  destaquesCorpo?: string[];
+  // Cor manual por palavra (índice da palavra no texto completo, não da
+  // linha) - sempre tem prioridade sobre o destaque automático acima.
+  // Editado pelo usuário clicando na palavra (ver InstagramWorkspace).
+  coresPalavrasTitulo?: Record<number, string>;
+  coresPalavrasCorpo?: Record<number, string>;
+  // Linha de ícones estilo Instagram (enviar/salvar) desenhada abaixo do
+  // corpo - usada só no slide de fechamento, onde o fundo vira neutro (sem
+  // a foto do assunto) e o post fica com cara de "pronto pra publicar".
+  iconesAcao?: boolean;
+  // Alinhamento geral escolhido manualmente pelo usuário - vale como
+  // padrão pra qualquer um dos 4 textos abaixo que não tenha o próprio
+  // alinhamento definido. undefined = cada texto segue o padrão que
+  // sempre teve (perfil.tituloAlinhamento pro título/corpo, esquerda pro
+  // rótulo/rodapé).
+  alinhamentoTexto?: AlinhamentoTexto;
+  // Alinhamento independente por texto (ver SeletorAlinhamento, uma
+  // instância por papel) - cada um, se definido, vence tanto o padrão do
+  // texto quanto alinhamentoTexto acima. Existem pra que o rótulo possa
+  // ficar à esquerda enquanto o título fica centralizado, por exemplo -
+  // antes só havia um controle pro post inteiro.
+  alinhamentoRotulo?: AlinhamentoTexto;
+  alinhamentoTitulo?: AlinhamentoTexto;
+  alinhamentoCorpo?: AlinhamentoTexto;
+  alinhamentoRodape?: AlinhamentoTexto;
+  // Componente da biblioteca do Sistema de Design que este slide usa (ver
+  // backend/design_system/schema.py e ai/direcao_arte.py) - decidido pela
+  // IA a partir do conteúdo já escrito, nunca pelo usuário. Hoje só
+  // "bloco_risco"/"bloco_oportunidade" (faixa semântica lateral) e
+  // "chamada_salvar"/"chamada_compartilhar"/"cta" (moldura do fechamento)
+  // mudam o desenho; os demais ids seguem o layout padrão de sempre -
+  // undefined/null tem exatamente o mesmo resultado que sempre existiu.
+  componente?: string | null;
 }
+
+// Cor semântica (risco/oportunidade) é deliberadamente separada da cor de
+// marca (corDestaque) - não é uma variação da identidade, é um sinal de
+// leitura (ver design_system/schema.py, componentes bloco_risco/
+// bloco_oportunidade) que precisa ler igual em qualquer perfil de cores.
+const COR_SEMANTICA_RISCO = "#E2574C";
+const COR_SEMANTICA_OPORTUNIDADE = "#3FA873";
 
 function luminancia(hex: string): number {
   const clean = hex.replace("#", "");
@@ -965,11 +1241,11 @@ function logoAnchor(
 export async function renderPostComModelo(
   canvas: HTMLCanvasElement,
   opts: RenderModeloOptions,
-): Promise<void> {
+): Promise<PosicoesTexto> {
   canvas.width = opts.width;
   canvas.height = opts.height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  if (!ctx) return {};
 
   const W = opts.width;
   const H = opts.height;
@@ -980,6 +1256,30 @@ export async function renderPostComModelo(
   await garantirFonteCarregada(fonteDestaqueId);
   const { perfil } = opts;
   const corFundoBase = perfil.corFundo || shade(perfil.corPrimaria, -70);
+
+  // Posição livre: cada elemento (texto ou logo) pode ter sido arrastado
+  // pra qualquer lugar da imagem - quando isso aconteceu, a posição
+  // escolhida pelo usuário vale no lugar da calculada automaticamente
+  // pro layout do perfil. Declarado aqui em cima (não só perto de onde os
+  // textos são desenhados) porque a logo é desenhada bem antes deles e
+  // também precisa registrar sua posição.
+  const posicoesResultado: PosicoesTexto = {};
+  function registrarPosicao(
+    papel: ChaveArrasto,
+    x: number,
+    y: number,
+    escala?: number,
+    larguraPx?: number,
+    alturaPx?: number,
+  ): void {
+    posicoesResultado[papel] = {
+      xPct: x / W,
+      yPct: y / H,
+      ...(escala !== undefined ? { escala } : {}),
+      ...(larguraPx !== undefined ? { larguraPct: larguraPx / W } : {}),
+      ...(alturaPx !== undefined ? { alturaPct: alturaPx / H } : {}),
+    };
+  }
 
   // Só trata como "template com foto" se o perfil indicar fundo fotográfico
   // E existir uma foto de verdade disponível - nunca inventa uma divisão de
@@ -1049,10 +1349,55 @@ export async function renderPostComModelo(
   if (opts.logoDataUrl) {
     try {
       const logo = await loadImage(opts.logoDataUrl);
-      const logoH = 64;
+      const ovLogo = opts.posicoes?.logo;
+      const escalaLogo = ovLogo?.escala ?? perfil.logoEscala ?? ESCALA_LOGO_PADRAO;
+      const logoH = 64 * escalaLogo;
       const logoW = (logo.width / logo.height) * logoH;
-      const { x, y } = logoAnchor(perfil.logoPosicao, W, H, logoW, logoH, pad);
+      const padrao = logoAnchor(perfil.logoPosicao, W, H, logoW, logoH, pad);
+      const x = ovLogo ? ovLogo.xPct * W : padrao.x;
+      const y = ovLogo ? ovLogo.yPct * H : padrao.y;
+
+      // Regra de contraste (ver design_system/schema.py::LogoRegras): por
+      // padrão nenhuma plaqueta, só a sombra suave de sempre - garante
+      // leitura na maioria dos fundos sem parecer um adesivo colado. Só
+      // quando a regra pede plaqueta fixa, ou quando "auto" mede o fundo
+      // sob a logo e a própria logo e os dois saem parecidos demais (a
+      // sombra sozinha não bastaria), é que uma plaqueta translúcida entra.
+      const regraContraste = perfil.logoContraste ?? "auto";
+      const areaSegura = perfil.logoAreaSeguraPx ?? 24;
+      let usaPlaqueta = regraContraste === "chapa-escura" || regraContraste === "chapa-clara";
+      let plaquetaEscura = regraContraste === "chapa-escura";
+
+      if (regraContraste === "auto") {
+        const lumFundo = luminanciaFundoSobRetangulo(ctx, x, y, logoW, logoH, W, H);
+        const lumLogo = await luminanciaDaImagem(logo);
+        if (lumFundo !== null && lumLogo !== null && Math.abs(lumFundo - lumLogo) < 0.35) {
+          usaPlaqueta = true;
+          plaquetaEscura = lumLogo > 0.5;
+        }
+      }
+
+      ctx.save();
+      if (usaPlaqueta) {
+        roundRect(
+          ctx,
+          x - areaSegura,
+          y - areaSegura,
+          logoW + areaSegura * 2,
+          logoH + areaSegura * 2,
+          Math.min(logoH / 2 + areaSegura, areaSegura * 2),
+        );
+        ctx.fillStyle = plaquetaEscura ? "rgba(8,9,13,0.55)" : "rgba(255,255,255,0.55)";
+        ctx.fill();
+      } else {
+        ctx.shadowColor = "rgba(0,0,0,0.45)";
+        ctx.shadowBlur = 16;
+        ctx.shadowOffsetY = 3;
+      }
       ctx.drawImage(logo, x, y, logoW, logoH);
+      ctx.restore();
+
+      registrarPosicao("logo", x, y, escalaLogo, logoW, logoH);
     } catch {
       // logo ilegível: segue sem travar a arte (nunca recriamos a logo por IA)
     }
@@ -1066,61 +1411,112 @@ export async function renderPostComModelo(
   else if (perfil.tituloPosicaoVertical === "centro") blocoY = zonaTopo + zonaAltura * 0.3;
   else blocoY = zonaBase - zonaAltura * 0.58;
 
-  const alinhamentoCanvas: Record<PerfilVisual["tituloAlinhamento"], CanvasTextAlign> = {
-    esquerda: "left",
-    centro: "center",
-    direita: "right",
-  };
-  const align = alinhamentoCanvas[perfil.tituloAlinhamento];
-  const anchorX = align === "left" ? pad : align === "right" ? W - pad : W / 2;
+  // Cada um dos 4 textos tem seu próprio alinhamento, escolhido na tela
+  // (botões por texto - ver SeletorAlinhamento) - o rótulo e o rodapé
+  // caem em "esquerda" sem escolha manual (comportamento de sempre);
+  // título e corpo caem no alinhamento da identidade visual (perfil).
+  // alinhamentoTexto é o padrão geral antigo: ainda funciona como piso
+  // pra qualquer um dos 4 que não tenha o próprio alinhamento definido.
+  const anchorXDoAlinhamento = (align: CanvasTextAlign): number =>
+    align === "left" ? pad : align === "right" ? W - pad : W / 2;
+  const alignRotulo = ALINHAMENTO_CANVAS[opts.alinhamentoRotulo ?? opts.alinhamentoTexto ?? "esquerda"];
+  const alignTitulo =
+    ALINHAMENTO_CANVAS[opts.alinhamentoTitulo ?? opts.alinhamentoTexto ?? perfil.tituloAlinhamento];
+  const alignCorpo =
+    ALINHAMENTO_CANVAS[opts.alinhamentoCorpo ?? opts.alinhamentoTexto ?? perfil.tituloAlinhamento];
+  const alignRodape = ALINHAMENTO_CANVAS[opts.alinhamentoRodape ?? opts.alinhamentoTexto ?? "esquerda"];
+  const anchorXTitulo = anchorXDoAlinhamento(alignTitulo);
+  const anchorXCorpo = anchorXDoAlinhamento(alignCorpo);
   const maxTextWidth = W - pad * 2;
 
-  const escala = FONT_SCALES[opts.escalaFonte ?? "media"];
+  const escalaRotulo = escalaDoTamanho(opts.tamanhoRotulo);
+  const escalaTitulo = escalaDoTamanho(opts.tamanhoTitulo);
+  const escalaCorpo = escalaDoTamanho(opts.tamanhoCorpo);
+  const escalaRodape = escalaDoTamanho(opts.tamanhoRodape);
   const corDestaqueFinal = opts.corDestaque || perfil.corPrimaria;
   const corSobreDestaque = corTextoSobre(corDestaqueFinal);
   const temFundo = (estilo: EstiloDestaqueId) => estilo === "solido" || estilo === "grifado";
 
-  // Kicker fica sempre à esquerda (elemento secundário) - a identidade que
-  // importa preservar é a do título/logo/rodapé, não a de um selinho de data.
+  // posicoesResultado (declarado lá em cima, antes da logo) devolve a
+  // posição EFETIVA de cada elemento (arrastado ou padrão) pra UI saber
+  // onde desenhar a alça de arrastar - cada papel é 100% independente,
+  // arrastar um não empurra os outros.
+
+  // Kicker: alinhamento próprio (ver alignRotulo acima) - continua
+  // podendo ser arrastado pra qualquer lugar, igual aos outros três.
+  const kickerAnchorX = anchorXDoAlinhamento(alignRotulo);
+  const kickerX = opts.posicoes?.rotulo ? opts.posicoes.rotulo.xPct * W : kickerAnchorX;
+  const kickerY = opts.posicoes?.rotulo ? opts.posicoes.rotulo.yPct * H : blocoY;
+  registrarPosicao("rotulo", kickerX, kickerY);
   ctx.textAlign = "left";
-  ctx.font = `700 ${Math.round(22 * escala)}px ${font}`;
+  ctx.font = `700 ${Math.round(22 * escalaRotulo)}px ${font}`;
   let cursorY = drawKickerPill(
     ctx,
     opts.kicker,
-    pad,
-    blocoY,
-    Math.round(40 * escala),
+    kickerX,
+    kickerY,
+    Math.round(40 * escalaRotulo),
     corDestaqueFinal,
     "#141414",
     opts.kickerEstilo ?? "solido",
+    alignRotulo,
   );
-  cursorY += Math.round(52 * escala);
+  cursorY += Math.round(52 * escalaRotulo);
 
-  ctx.textAlign = align;
+  ctx.textAlign = alignTitulo;
   const headlineTexto = perfil.tituloCaixaAlta ? opts.headline.toUpperCase() : opts.headline;
-  const tamanhoTitulo = Math.round(52 * escala);
-  const lineHeightTitulo = Math.round(58 * escala);
+  const tamanhoTitulo = Math.round(52 * escalaTitulo);
+  const lineHeightTitulo = Math.round(58 * escalaTitulo);
   ctx.font = `${fonteDestaque.peso} ${tamanhoTitulo}px ${fonteDestaque.family}`;
   const headlineLines = wrapLines(ctx, headlineTexto, maxTextWidth).slice(0, 3);
   const estiloTitulo = opts.estiloTitulo ?? "nenhum";
+  const tituloX = opts.posicoes?.titulo ? opts.posicoes.titulo.xPct * W : anchorXTitulo;
+  let tituloY = opts.posicoes?.titulo ? opts.posicoes.titulo.yPct * H : cursorY;
+  registrarPosicao("titulo", tituloX, tituloY);
+  const tituloTopo = tituloY;
+  const coresTitulo = calcularCoresPalavras(
+    tokenizarPalavras(headlineTexto),
+    opts.destaquesTitulo,
+    opts.coresPalavrasTitulo,
+    corDestaqueFinal,
+  );
+  let indiceTitulo = 0;
   for (const line of headlineLines) {
     if (estiloTitulo !== "nenhum") {
       desenharFundoAtrasTexto(
         ctx,
         line,
-        anchorX,
-        cursorY,
+        tituloX,
+        tituloY,
         tamanhoTitulo,
-        align,
+        alignTitulo,
         corDestaqueFinal,
         estiloTitulo,
       );
     }
-    ctx.fillStyle = temFundo(estiloTitulo) ? corSobreDestaque : corTexto;
-    ctx.fillText(line, anchorX, cursorY);
-    cursorY += lineHeightTitulo;
+    // Quando o estilo já pinta um fundo sólido/marca-texto atrás da
+    // linha inteira, a cor por palavra fica invisível/redundante (o
+    // fundo já É a cor de destaque) - nesse caso mantém a cor de
+    // contraste uniforme de sempre.
+    if (temFundo(estiloTitulo)) {
+      ctx.fillStyle = corSobreDestaque;
+      ctx.fillText(line, tituloX, tituloY);
+    } else {
+      desenharLinhaColorida(
+        ctx,
+        line,
+        indiceTitulo,
+        coresTitulo,
+        tituloX,
+        tituloY,
+        alignTitulo,
+        corTexto,
+      );
+    }
+    indiceTitulo += line.split(" ").filter(Boolean).length;
+    tituloY += lineHeightTitulo;
   }
-  cursorY += Math.round(40 * escala);
+  cursorY += headlineLines.length * lineHeightTitulo + Math.round(40 * escalaTitulo);
 
   // Tenta o corpo no tamanho normal e só diminui a fonte (nunca o
   // espaçamento entre elementos) se não couber - evita tanto cortar texto
@@ -1134,40 +1530,186 @@ export async function renderPostComModelo(
     cursorY,
     zonaBase,
     font,
-    escala,
+    escalaCorpo,
   );
   const estiloCorpo = opts.estiloCorpo ?? "nenhum";
   const tamanhoCorpoEstimado = Math.round(bodyLines.lineHeight / 1.3);
+  const corpoX = opts.posicoes?.corpo ? opts.posicoes.corpo.xPct * W : anchorXCorpo;
+  let corpoY = opts.posicoes?.corpo ? opts.posicoes.corpo.yPct * H : cursorY;
+  registrarPosicao("corpo", corpoX, corpoY);
+  const coresCorpo = calcularCoresPalavras(
+    tokenizarPalavras(opts.corpo),
+    opts.destaquesCorpo,
+    opts.coresPalavrasCorpo,
+    corDestaqueFinal,
+  );
+  ctx.textAlign = alignCorpo;
+  let indiceCorpo = 0;
   for (const line of bodyLines.linhas) {
     if (estiloCorpo !== "nenhum") {
       desenharFundoAtrasTexto(
         ctx,
         line,
-        anchorX,
-        cursorY,
+        corpoX,
+        corpoY,
         tamanhoCorpoEstimado,
-        align,
+        alignCorpo,
         corDestaqueFinal,
         estiloCorpo,
       );
     }
-    ctx.fillStyle = temFundo(estiloCorpo) ? corSobreDestaque : corTextoSecundario;
-    ctx.fillText(line, anchorX, cursorY);
-    cursorY += bodyLines.lineHeight;
+    if (temFundo(estiloCorpo)) {
+      ctx.fillStyle = corSobreDestaque;
+      ctx.fillText(line, corpoX, corpoY);
+    } else {
+      desenharLinhaColorida(
+        ctx,
+        line,
+        indiceCorpo,
+        coresCorpo,
+        corpoX,
+        corpoY,
+        alignCorpo,
+        corTextoSecundario,
+      );
+    }
+    indiceCorpo += line.split(" ").filter(Boolean).length;
+    corpoY += bodyLines.lineHeight;
   }
   ctx.textAlign = "left";
+
+  // tituloTopo é a linha de base (baseline) da primeira linha do título -
+  // as letras sobem bem acima dela (maiúsculas/ascendentes de uma fonte de
+  // 52px sobem quase o tamanho inteiro da fonte). Qualquer moldura/faixa
+  // que use tituloTopo direto corta o próprio texto por cima; este é o
+  // topo visual de verdade, usado pelos dois blocos abaixo.
+  const tituloTopoVisivel = tituloTopo - Math.round(tamanhoTitulo * 0.82);
+
+  // Faixa semântica de risco/oportunidade: uma "espinha" colorida fixa na
+  // margem esquerda da página (não do texto - por isso ignora o
+  // alinhamento de título/corpo), como uma tarja de editorial de revista.
+  // É a única leitura visual
+  // reservada exclusivamente pra esses dois componentes (ver
+  // ai/direcao_arte.py) - nenhum outro estilo usa essas cores.
+  if (opts.componente === "bloco_risco" || opts.componente === "bloco_oportunidade") {
+    const corSemantica =
+      opts.componente === "bloco_risco" ? COR_SEMANTICA_RISCO : COR_SEMANTICA_OPORTUNIDADE;
+    roundRect(
+      ctx,
+      pad - 20,
+      tituloTopoVisivel - 6,
+      5,
+      Math.max(40, corpoY - tituloTopoVisivel + 10),
+      2.5,
+    );
+    ctx.fillStyle = corSemantica;
+    ctx.fill();
+  }
+
+  // Moldura do fechamento: o texto de CTA flutuando sozinho sobre um fundo
+  // neutro é o que fazia o slide parecer print de sistema em vez de peça
+  // pronta - um contorno fechado ao redor do próprio bloco de texto lê como
+  // uma chamada de verdade (ver ai/carrossel.py::_slide_fechamento).
+  if (
+    opts.iconesAcao &&
+    (opts.componente === "chamada_salvar" ||
+      opts.componente === "chamada_compartilhar" ||
+      opts.componente === "cta")
+  ) {
+    const cardPad = 24;
+    roundRect(
+      ctx,
+      pad - cardPad,
+      tituloTopoVisivel - cardPad,
+      W - pad * 2 + cardPad * 2,
+      corpoY - tituloTopoVisivel + cardPad * 1.8,
+      18,
+    );
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = corDestaqueFinal;
+    ctx.stroke();
+  }
+
+  if (opts.elementoVisual) {
+    const larguraGrafico = Math.min(maxTextWidth, 420);
+    const graficoXPadrao = alignCorpo === "right" ? W - pad - larguraGrafico : pad;
+    // Vão maior que o de outros textos (40px não bastava): a etiqueta de
+    // arrasto do gráfico flutua ACIMA do próprio ponto de ancoragem (igual
+    // às outras), então precisa de espaço vertical real até a última linha
+    // do corpo pra não ficar em cima do texto - a própria razão de ser
+    // dessa correção. Se o corpo for tão longo que não sobra espaço antes
+    // do rodapé, é melhor OMITIR o elemento do que desenhá-lo por cima do
+    // próprio corpo (nunca usa um teto que jogue a posição pra trás do
+    // ponto natural) - a posição arrastada manualmente ignora essa checagem.
+    const alturaGrafico = alturaElementoVisual(opts.elementoVisual);
+    const graficoYAuto = corpoY + 96;
+    const temPosicaoManual = !!opts.posicoes?.grafico;
+    if (temPosicaoManual || graficoYAuto + alturaGrafico <= zonaBase - 48) {
+      const graficoX = opts.posicoes?.grafico ? opts.posicoes.grafico.xPct * W : graficoXPadrao;
+      const graficoY = opts.posicoes?.grafico ? opts.posicoes.grafico.yPct * H : graficoYAuto;
+      // Tamanho ajustável (alça de redimensionar, igual à logo) - em vez
+      // de recalcular cada medida/fonte internamente, escala o contexto
+      // inteiro ao redor do ponto de ancoragem: escala tudo que
+      // desenharElementoVisual desenha (texto, barras, traços, sombra)
+      // proporcionalmente, sem duplicar a lógica de desenho.
+      const escalaGrafico = opts.posicoes?.grafico?.escala ?? ESCALA_GRAFICO_PADRAO;
+      ctx.save();
+      ctx.translate(graficoX, graficoY);
+      ctx.scale(escalaGrafico, escalaGrafico);
+      const alturaUsada = desenharElementoVisual(
+        ctx,
+        opts.elementoVisual,
+        0,
+        0,
+        larguraGrafico,
+        corDestaqueFinal,
+        corTexto,
+        corTextoSecundario,
+        font,
+        fonteDestaque.family,
+        fonteDestaque.peso,
+      );
+      ctx.restore();
+      registrarPosicao(
+        "grafico",
+        graficoX,
+        graficoY,
+        escalaGrafico,
+        larguraGrafico * escalaGrafico,
+        alturaUsada * escalaGrafico,
+      );
+    }
+  }
+
+  if (opts.iconesAcao) {
+    const tamanhoIcone = 34;
+    const gap = 30;
+    const totalW = tamanhoIcone * 3 + gap * 2;
+    const iconY = Math.min(corpoY + 56, zonaBase - 30);
+    const iconStartX = W / 2 - totalW / 2 + tamanhoIcone / 2;
+    desenharIconeEnviar(ctx, iconStartX, iconY, tamanhoIcone, corTexto);
+    desenharIconeCompartilhar(ctx, iconStartX + tamanhoIcone + gap, iconY, tamanhoIcone, corTexto);
+    desenharIconeSalvar(ctx, iconStartX + (tamanhoIcone + gap) * 2, iconY, tamanhoIcone, corTexto);
+  }
+
+  const rodapeAnchorX = anchorXDoAlinhamento(alignRodape);
+  const rodapeYPadrao = perfil.temFaixaRodape ? H - 84 : H - pad - 8 + 34;
+  const rodapeX = opts.posicoes?.rodape ? opts.posicoes.rodape.xPct * W : rodapeAnchorX;
+  const rodapeY = opts.posicoes?.rodape ? opts.posicoes.rodape.yPct * H : rodapeYPadrao;
+  registrarPosicao("rodape", rodapeX, rodapeY);
+  ctx.textAlign = alignRodape;
 
   if (perfil.temFaixaRodape) {
     const corFaixa = perfil.corSecundaria || perfil.corPrimaria;
     ctx.fillStyle = corFaixa;
     ctx.fillRect(0, H - 150, W, 150);
-    ctx.font = `700 26px ${font}`;
+    ctx.font = `700 ${Math.round(26 * escalaRodape)}px ${font}`;
     ctx.fillStyle = corTextoSobre(corFaixa);
-    ctx.fillText(opts.nomeEscritorio || "Seu Escritório", pad, H - 84);
+    ctx.fillText(opts.nomeEscritorio || "Seu Escritório", rodapeX, rodapeY);
     if (opts.registro) {
-      ctx.font = `400 20px ${font}`;
+      ctx.font = `400 ${Math.round(20 * escalaRodape)}px ${font}`;
       ctx.fillStyle = corTextoSecundarioSobre(corFaixa);
-      ctx.fillText(opts.registro, pad, H - 52);
+      ctx.fillText(opts.registro, rodapeX, rodapeY + Math.round(32 * escalaRodape));
     }
   } else {
     const lineY = H - pad - 8;
@@ -1177,10 +1719,11 @@ export async function renderPostComModelo(
     ctx.moveTo(pad, lineY);
     ctx.lineTo(W - pad, lineY);
     ctx.stroke();
-    ctx.font = `600 24px ${font}`;
+    ctx.font = `600 ${Math.round(24 * escalaRodape)}px ${font}`;
     ctx.fillStyle = corTexto;
-    ctx.fillText(opts.nomeEscritorio || "Seu Escritório", pad, lineY + 34);
+    ctx.fillText(opts.nomeEscritorio || "Seu Escritório", rodapeX, rodapeY);
   }
+  ctx.textAlign = "left";
 
   if (opts.progresso && opts.progresso.total > 1) {
     const { atual, total } = opts.progresso;
@@ -1196,4 +1739,6 @@ export async function renderPostComModelo(
       dx += gap;
     }
   }
+
+  return posicoesResultado;
 }

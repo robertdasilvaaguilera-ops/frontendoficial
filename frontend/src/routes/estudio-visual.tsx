@@ -1,20 +1,46 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Download, Loader2, Search, Sparkles, Upload, Wand2, X } from "lucide-react";
-import { opportunitiesQuery, newsQuery, gerarPostComModelo } from "@/lib/atlas-api";
+import {
+  CheckCircle2,
+  Download,
+  Loader2,
+  Search,
+  ShieldAlert,
+  Sparkles,
+  Upload,
+  Wand2,
+  X,
+} from "lucide-react";
+import {
+  opportunitiesQuery,
+  newsQuery,
+  gerarPostComModelo,
+  type ConfigModeloVisual,
+  type ElementoVisualSlideResposta,
+} from "@/lib/atlas-api";
 import { fileToDataUrl, getBrandConfig } from "@/lib/brand-config";
+import { ModelosVisuaisPainel } from "@/components/ModelosVisuaisPainel";
 import {
   renderPostComModelo,
   FONTES_DESTAQUE,
   KICKER_ESTILOS,
   ESTILOS_DESTAQUE_TEXTO,
+  TAMANHOS_FONTE,
+  TAMANHO_FONTE_PADRAO,
   type FonteDestaqueId,
   type KickerEstiloId,
   type EstiloDestaqueId,
-  type FontScale,
+  type PapelTexto,
+  type ChaveArrasto,
+  type PosicoesTexto,
   type PerfilVisual,
+  type AlinhamentoTexto,
 } from "@/lib/instagram-canvas";
+import { PosicionadorTexto } from "@/components/PosicionadorTexto";
+import { SeletorAlinhamento } from "@/components/SeletorAlinhamento";
+import { PalavrasColoridas } from "@/components/PalavrasColoridas";
+import { useSessaoAtual } from "@/components/AuthGate";
 import type { Opportunity, NewsItem } from "@/lib/atlas-types";
 
 export const Route = createFileRoute("/estudio-visual")({
@@ -76,7 +102,44 @@ function noticiaParaItem(n: NewsItem): ItemBase {
 const CANVAS_W = 1080;
 const CANVAS_H = 1350;
 
+// Só mostra alça de arrastar pra texto que o post realmente tem - rótulo
+// e título sempre vêm da IA, corpo é opcional, rodapé sempre desenha
+// algo (nome real ou "Seu Escritório"). A logo só entra quando o
+// escritório tem uma configurada.
+function papeisAtivosDoResultado(
+  resultado: { corpo: string; elementoVisual?: unknown } | null,
+): ChaveArrasto[] {
+  const papeis: ChaveArrasto[] = ["rotulo", "titulo", "rodape"];
+  if (resultado?.corpo?.trim()) papeis.push("corpo");
+  if (resultado?.elementoVisual) papeis.push("grafico");
+  if (getBrandConfig().logoDataUrl) papeis.push("logo");
+  return papeis;
+}
+
 function EstudioVisual() {
+  const sessao = useSessaoAtual();
+
+  // Estúdio Visual é um recurso avançado - básico só tem Radar e Notícias.
+  // O backend já bloqueia (403) quem não tem acesso, isso aqui evita nem
+  // tentar buscar os dados pra quem não pode ver de qualquer forma.
+  if (sessao?.limites.recursosAvancados === false) {
+    return (
+      <div className="max-w-[1000px] mx-auto px-6 lg:px-10 py-8">
+        <div className="surface rounded-lg p-8 flex flex-col items-center text-center gap-3">
+          <ShieldAlert className="h-6 w-6 text-muted-foreground" />
+          <div className="text-sm font-medium">Estúdio Visual não está no seu nível de acesso</div>
+          <p className="text-xs text-muted-foreground max-w-sm">
+            Seu nível de acesso é limitado a Radar Comercial e Notícias.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return <EstudioVisualConteudo />;
+}
+
+function EstudioVisualConteudo() {
   const { data: opps } = useSuspenseQuery(opportunitiesQuery);
   const { data: news } = useSuspenseQuery(newsQuery);
 
@@ -92,6 +155,11 @@ function EstudioVisual() {
     legenda: string;
     perfil: PerfilVisual;
     imagemFundoDataUrl: string | null;
+    elementoVisual: ElementoVisualSlideResposta | null;
+    destaquesTitulo: string[];
+    destaquesCorpo: string[];
+    coresPalavrasTitulo: Record<number, string>;
+    coresPalavrasCorpo: Record<number, string>;
   } | null>(null);
 
   // Personalização - puramente de desenho (não chama a IA de novo), então
@@ -99,10 +167,25 @@ function EstudioVisual() {
   // gerado. Mesmo conjunto de controles do carrossel (InstagramWorkspace).
   const [fonte, setFonte] = useState<FonteDestaqueId>("inter");
   const [kickerEstilo, setKickerEstilo] = useState<KickerEstiloId>("solido");
-  const [escalaFonte, setEscalaFonte] = useState<FontScale>("media");
+  const [tamanhoRotulo, setTamanhoRotulo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoTitulo, setTamanhoTitulo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoCorpo, setTamanhoCorpo] = useState(TAMANHO_FONTE_PADRAO);
+  const [tamanhoRodape, setTamanhoRodape] = useState(TAMANHO_FONTE_PADRAO);
   const [corDestaque, setCorDestaque] = useState<string | null>(null);
   const [estiloTitulo, setEstiloTitulo] = useState<EstiloDestaqueId>("nenhum");
   const [estiloCorpo, setEstiloCorpo] = useState<EstiloDestaqueId>("nenhum");
+  // Um por texto (não mais um único botão pro post inteiro) - null =
+  // segue o próprio padrão desse texto (perfil visual pro título/corpo,
+  // esquerda pro rótulo/rodapé).
+  const [alinhamentoRotulo, setAlinhamentoRotulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoTitulo, setAlinhamentoTitulo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoCorpo, setAlinhamentoCorpo] = useState<AlinhamentoTexto | null>(null);
+  const [alinhamentoRodape, setAlinhamentoRodape] = useState<AlinhamentoTexto | null>(null);
+  // Posição livre - vazio = ninguém foi arrastado ainda (posição do
+  // layout padrão). posicoesAtuais é a posição EFETIVA devolvida pelo
+  // último desenho, usada só pra colocar a alça de arrastar no lugar certo.
+  const [posicoesEscolhidas, setPosicoesEscolhidas] = useState<PosicoesTexto>({});
+  const [posicoesAtuais, setPosicoesAtuais] = useState<PosicoesTexto>({});
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -136,6 +219,7 @@ function EstudioVisual() {
     setLoading(true);
     setErro(null);
     setResultado(null);
+    setPosicoesEscolhidas({});
     try {
       const r = await gerarPostComModelo({
         kind: itemEscolhido.kind,
@@ -149,12 +233,45 @@ function EstudioVisual() {
         legenda: r.legenda,
         perfil: r.perfilVisual as PerfilVisual,
         imagemFundoDataUrl: r.imagemFundoDataUrl,
+        elementoVisual: r.elementoVisual ?? null,
+        destaquesTitulo: r.destaquesTitulo ?? [],
+        destaquesCorpo: r.destaquesCorpo ?? [],
+        coresPalavrasTitulo: {},
+        coresPalavrasCorpo: {},
       });
+      // Réplica fiel: os controles de estilo partem exatamente do que foi
+      // extraído das referências, não do padrão hardcoded - cada "Gerar"
+      // já reseta o resto do estado (posicoesEscolhidas etc), então faz
+      // sentido também resetar o estilo pro que veio da identidade.
+      setFonte(r.perfilVisual.fonteDestaque as FonteDestaqueId);
+      setKickerEstilo(r.perfilVisual.kickerEstilo as KickerEstiloId);
+      setEstiloTitulo(r.perfilVisual.estiloTitulo as EstiloDestaqueId);
+      setEstiloCorpo(r.perfilVisual.estiloCorpo as EstiloDestaqueId);
     } catch (err) {
       setErro(err instanceof Error ? err.message : "Não consegui gerar o post agora.");
     } finally {
       setLoading(false);
     }
+  }
+
+  // Cor manual por palavra (título/corpo) - sempre ganha do destaque
+  // automático da IA. Igual ao carrossel (InstagramWorkspace), só que sem
+  // array de slides - aqui é um resultado único.
+  function mudarCorPalavra(campo: "titulo" | "corpo", indicePalavra: number, cor: string) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setResultado((prev) =>
+      prev ? { ...prev, [chave]: { ...prev[chave], [indicePalavra]: cor } } : prev,
+    );
+  }
+
+  function limparCorPalavra(campo: "titulo" | "corpo", indicePalavra: number) {
+    const chave = campo === "titulo" ? "coresPalavrasTitulo" : "coresPalavrasCorpo";
+    setResultado((prev) => {
+      if (!prev) return prev;
+      const atual = { ...prev[chave] };
+      delete atual[indicePalavra];
+      return { ...prev, [chave]: atual };
+    });
   }
 
   const desenhar = useCallback(() => {
@@ -171,15 +288,35 @@ function EstudioVisual() {
       headline: resultado.headline,
       corpo: resultado.corpo,
       perfil: resultado.perfil,
+      // Post único (não carrossel) - é sempre "a peça final", então ganha
+      // a mesma linha de ícones (enviar/compartilhar/salvar) que o slide
+      // de fechamento do carrossel usa, pra parecer pronto pra publicar
+      // igual em qualquer área (ver renderPostComModelo::iconesAcao).
+      iconesAcao: true,
       fonteDestaque: fonte,
       kickerEstilo,
       estiloTitulo,
       estiloCorpo,
-      escalaFonte,
+      tamanhoRotulo,
+      tamanhoTitulo,
+      tamanhoCorpo,
+      tamanhoRodape,
       corDestaque: corDestaque ?? undefined,
-    }).catch(() => {
-      // fundo/logo ilegível - a arte segue sem travar
-    });
+      alinhamentoRotulo: alinhamentoRotulo ?? undefined,
+      alinhamentoTitulo: alinhamentoTitulo ?? undefined,
+      alinhamentoCorpo: alinhamentoCorpo ?? undefined,
+      alinhamentoRodape: alinhamentoRodape ?? undefined,
+      posicoes: posicoesEscolhidas,
+      elementoVisual: resultado.elementoVisual,
+      destaquesTitulo: resultado.destaquesTitulo,
+      destaquesCorpo: resultado.destaquesCorpo,
+      coresPalavrasTitulo: resultado.coresPalavrasTitulo,
+      coresPalavrasCorpo: resultado.coresPalavrasCorpo,
+    })
+      .then(setPosicoesAtuais)
+      .catch(() => {
+        // fundo/logo ilegível - a arte segue sem travar
+      });
   }, [
     resultado,
     itemEscolhido,
@@ -187,8 +324,16 @@ function EstudioVisual() {
     kickerEstilo,
     estiloTitulo,
     estiloCorpo,
-    escalaFonte,
+    tamanhoRotulo,
+    tamanhoTitulo,
+    tamanhoCorpo,
+    tamanhoRodape,
     corDestaque,
+    alinhamentoRotulo,
+    alinhamentoTitulo,
+    alinhamentoCorpo,
+    alinhamentoRodape,
+    posicoesEscolhidas,
   ]);
 
   useEffect(() => {
@@ -382,8 +527,52 @@ function EstudioVisual() {
               <div className="text-[11px] font-mono uppercase tracking-widest text-primary mb-3">
                 Depois — novo post ATLAS
               </div>
-              <div className="surface rounded-lg overflow-hidden max-w-[320px]">
-                <canvas ref={canvasRef} className="w-full h-auto block" />
+              <div className="max-w-[320px]">
+                <PosicionadorTexto
+                  posicoes={posicoesAtuais}
+                  papeisAtivos={papeisAtivosDoResultado(resultado)}
+                  onMover={(papel, xPct, yPct) =>
+                    setPosicoesEscolhidas((prev) => ({
+                      ...prev,
+                      [papel]: { ...prev[papel], xPct, yPct },
+                    }))
+                  }
+                  onRedimensionarLogo={(escala) =>
+                    setPosicoesEscolhidas((prev) => ({
+                      ...prev,
+                      logo: {
+                        xPct: prev.logo?.xPct ?? posicoesAtuais.logo?.xPct ?? 0,
+                        yPct: prev.logo?.yPct ?? posicoesAtuais.logo?.yPct ?? 0,
+                        escala,
+                      },
+                    }))
+                  }
+                  onRedimensionarGrafico={(escala) =>
+                    setPosicoesEscolhidas((prev) => ({
+                      ...prev,
+                      grafico: {
+                        xPct: prev.grafico?.xPct ?? posicoesAtuais.grafico?.xPct ?? 0,
+                        yPct: prev.grafico?.yPct ?? posicoesAtuais.grafico?.yPct ?? 0,
+                        escala,
+                      },
+                    }))
+                  }
+                >
+                  <div className="surface rounded-lg overflow-hidden">
+                    <canvas ref={canvasRef} className="w-full h-auto block" />
+                  </div>
+                </PosicionadorTexto>
+              </div>
+              <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span>Arraste as etiquetas na imagem pra mover cada texto</span>
+                {Object.keys(posicoesEscolhidas).length > 0 && (
+                  <button
+                    onClick={() => setPosicoesEscolhidas({})}
+                    className="text-primary hover:underline"
+                  >
+                    Redefinir posições
+                  </button>
+                )}
               </div>
               <button
                 onClick={baixar}
@@ -396,6 +585,44 @@ function EstudioVisual() {
 
             {/* Personalizar - só desenha de novo, não chama a IA */}
             <div className="space-y-4">
+              <ModelosVisuaisPainel
+                configAtual={{
+                  fonte,
+                  kickerEstilo,
+                  estiloTitulo,
+                  estiloCorpo,
+                  tamanhoRotulo,
+                  tamanhoTitulo,
+                  tamanhoCorpo,
+                  tamanhoRodape,
+                  corDestaque,
+                  alinhamentoRotulo,
+                  alinhamentoTitulo,
+                  alinhamentoCorpo,
+                  alinhamentoRodape,
+                }}
+                onAplicar={(c: ConfigModeloVisual) => {
+                  setFonte(c.fonte as FonteDestaqueId);
+                  setKickerEstilo(c.kickerEstilo as KickerEstiloId);
+                  setEstiloTitulo(c.estiloTitulo as EstiloDestaqueId);
+                  setEstiloCorpo(c.estiloCorpo as EstiloDestaqueId);
+                  setTamanhoRotulo(c.tamanhoRotulo);
+                  setTamanhoTitulo(c.tamanhoTitulo);
+                  setTamanhoCorpo(c.tamanhoCorpo);
+                  setTamanhoRodape(c.tamanhoRodape);
+                  setCorDestaque(c.corDestaque);
+                  setAlinhamentoRotulo((c.alinhamentoRotulo as AlinhamentoTexto) ?? null);
+                  setAlinhamentoTitulo((c.alinhamentoTitulo as AlinhamentoTexto) ?? null);
+                  setAlinhamentoCorpo((c.alinhamentoCorpo as AlinhamentoTexto) ?? null);
+                  setAlinhamentoRodape((c.alinhamentoRodape as AlinhamentoTexto) ?? null);
+                }}
+              />
+
+              <SeletorAlinhamento label="Alinhamento do rótulo" valor={alinhamentoRotulo} onChange={setAlinhamentoRotulo} />
+              <SeletorAlinhamento label="Alinhamento do título" valor={alinhamentoTitulo} onChange={setAlinhamentoTitulo} />
+              <SeletorAlinhamento label="Alinhamento do corpo" valor={alinhamentoCorpo} onChange={setAlinhamentoCorpo} />
+              <SeletorAlinhamento label="Alinhamento do rodapé" valor={alinhamentoRodape} onChange={setAlinhamentoRodape} />
+
               <div className="surface rounded-lg p-4">
                 <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
                   Fonte do título
@@ -422,20 +649,23 @@ function EstudioVisual() {
                   <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-1.5">
                     Tamanho da fonte
                   </div>
-                  <div className="inline-flex rounded-md border border-border overflow-hidden w-full">
-                    {(["pequena", "media", "grande"] as FontScale[]).map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => setEscalaFonte(s)}
-                        className={`flex-1 py-1.5 text-xs font-medium ${
-                          escalaFonte === s
-                            ? "bg-primary text-primary-foreground"
-                            : "text-muted-foreground hover:bg-accent"
-                        }`}
-                      >
-                        {s === "pequena" ? "P" : s === "media" ? "M" : "G"}
-                      </button>
-                    ))}
+                  <div className="grid grid-cols-2 gap-2">
+                    <SeletorTamanho
+                      label="Rótulo"
+                      valor={tamanhoRotulo}
+                      onChange={setTamanhoRotulo}
+                    />
+                    <SeletorTamanho
+                      label="Título"
+                      valor={tamanhoTitulo}
+                      onChange={setTamanhoTitulo}
+                    />
+                    <SeletorTamanho label="Corpo" valor={tamanhoCorpo} onChange={setTamanhoCorpo} />
+                    <SeletorTamanho
+                      label="Rodapé"
+                      valor={tamanhoRodape}
+                      onChange={setTamanhoRodape}
+                    />
                   </div>
                 </div>
 
@@ -527,6 +757,46 @@ function EstudioVisual() {
                   ))}
                 </div>
               </div>
+
+              <div className="surface rounded-lg p-4">
+                {resultado.elementoVisual && (
+                  <div className="pb-3 mb-3 border-b border-border flex items-center justify-between">
+                    <div className="text-xs text-muted-foreground">
+                      Este post tem um número/gráfico em destaque
+                    </div>
+                    <button
+                      onClick={() => setResultado((prev) => (prev ? { ...prev, elementoVisual: null } : prev))}
+                      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-risk"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Remover
+                    </button>
+                  </div>
+                )}
+                <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
+                  Cor por palavra
+                </div>
+                <div className="space-y-2">
+                  <PalavrasColoridas
+                    texto={resultado.headline}
+                    destaques={resultado.destaquesTitulo}
+                    overrides={resultado.coresPalavrasTitulo}
+                    corDestaque={corDestaque ?? resultado.perfil.corPrimaria}
+                    onMudarCor={(i, cor) => mudarCorPalavra("titulo", i, cor)}
+                    onLimparCor={(i) => limparCorPalavra("titulo", i)}
+                  />
+                  {resultado.corpo && (
+                    <PalavrasColoridas
+                      texto={resultado.corpo}
+                      destaques={resultado.destaquesCorpo}
+                      overrides={resultado.coresPalavrasCorpo}
+                      corDestaque={corDestaque ?? resultado.perfil.corPrimaria}
+                      onMudarCor={(i, cor) => mudarCorPalavra("corpo", i, cor)}
+                      onLimparCor={(i) => limparCorPalavra("corpo", i)}
+                    />
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -541,5 +811,32 @@ function EstudioVisual() {
         </section>
       )}
     </div>
+  );
+}
+
+function SeletorTamanho({
+  label,
+  valor,
+  onChange,
+}: {
+  label: string;
+  valor: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block">
+      <div className="text-[9px] text-muted-foreground mb-1">{label}</div>
+      <select
+        value={valor}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full bg-background border border-border rounded-md px-2 py-1.5 text-xs"
+      >
+        {TAMANHOS_FONTE.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

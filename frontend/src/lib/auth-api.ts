@@ -22,6 +22,7 @@ export interface LimitesNivel {
   chat: boolean;
   chatUsdDia: number | null;
   pareceresPostsSemana: number | null;
+  recursosAvancados: boolean;
 }
 
 export interface UsoAtual {
@@ -42,6 +43,22 @@ export interface UsuarioLogin {
   usuario: string;
   nivel: NivelAcesso;
   criadoEm: string;
+}
+
+export interface Convite {
+  token: string;
+  nivel: NivelAcesso;
+  rotulo: string | null;
+  criadoPor: string;
+  criadoEm: string;
+  expiraEm: string;
+  usadoEm: string | null;
+  usuarioCriado: string | null;
+}
+
+export interface ConviteInfo {
+  nivel: NivelAcesso;
+  rotulo: string | null;
 }
 
 const STATUS_DESLOGADO: AuthStatus = {
@@ -109,14 +126,6 @@ export async function listarUsuarios(): Promise<UsuarioLogin[]> {
   return (await r.json()) as UsuarioLogin[];
 }
 
-export function criarUsuario(
-  usuario: string,
-  senha: string,
-  nivel: Exclude<NivelAcesso, "admin">,
-): Promise<void> {
-  return postAuth("/auth/users", { usuario, senha, nivel });
-}
-
 export async function removerUsuario(usuario: string): Promise<void> {
   if (!API_URL) precisaDeApi();
   const r = await fetch(`${API_URL}/auth/users/${encodeURIComponent(usuario)}`, {
@@ -134,49 +143,72 @@ export const usersQuery = queryOptions({
   queryFn: listarUsuarios,
 });
 
-// Força uma rodada de coleta (CARF/STJ/STF/PGFN/Receita/TRF4/DJEN) na hora,
-// em vez de esperar o próximo horário agendado (10:30/14:30/22:30 UTC) - ver
-// /admin/coletar-decisoes-agora em api_server.py. Só admin. A resposta volta
-// na hora (a coleta em si roda em background no servidor) - ela pode levar
-// vários minutos pra terminar de verdade.
-export async function coletarDecisoesAgora(): Promise<void> {
+// Convite: o dono nunca escolhe usuário/senha de ninguém - gera um link de
+// uso único com o nível já embutido, manda pra pessoa por fora da
+// plataforma (WhatsApp, e-mail etc), e é ela quem escolhe o próprio login
+// ao abrir o link (ver /convite/$token). "rotulo" é só uma anotação livre
+// do dono pra lembrar pra quem mandou cada convite.
+export async function listarConvites(): Promise<Convite[]> {
+  if (!API_URL) return [];
+  const r = await fetch(`${API_URL}/auth/invites`, { credentials: "include" });
+  if (!r.ok) throw new Error(`Falha ao listar convites (HTTP ${r.status})`);
+  return (await r.json()) as Convite[];
+}
+
+export async function criarConvite(
+  nivel: Exclude<NivelAcesso, "admin">,
+  rotulo: string,
+): Promise<{ token: string }> {
   if (!API_URL) precisaDeApi();
-  const r = await fetch(`${API_URL}/admin/coletar-decisoes-agora`, {
+  const r = await fetch(`${API_URL}/auth/invites`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nivel, rotulo }),
     credentials: "include",
   });
   if (!r.ok) {
     const erro = await r.json().catch(() => null);
-    throw new Error(erro?.detail || `Falha na coleta (HTTP ${r.status})`);
+    throw new Error(erro?.detail || `Falha ao gerar convite (HTTP ${r.status})`);
   }
+  return (await r.json()) as { token: string };
 }
 
-export interface RestauracaoBackup {
-  ok: boolean;
-  linhasRestauradas: number;
-  linksMarcadosVistos: number;
-}
-
-// Restauração pontual do Excel de decisões perdido nos redeploys anteriores
-// ao volume persistente entrar em vigor - ver /admin/restaurar-decisoes-backup
-// em api_server.py. Uso único (backup local pré-migração).
-export async function restaurarDecisoesBackup(arquivo: File): Promise<RestauracaoBackup> {
+export async function removerConvite(token: string): Promise<void> {
   if (!API_URL) precisaDeApi();
-  const form = new FormData();
-  form.append("arquivo", arquivo);
-  const r = await fetch(`${API_URL}/admin/restaurar-decisoes-backup`, {
-    method: "POST",
-    body: form,
+  const r = await fetch(`${API_URL}/auth/invites/${encodeURIComponent(token)}`, {
+    method: "DELETE",
     credentials: "include",
   });
   if (!r.ok) {
     const erro = await r.json().catch(() => null);
-    throw new Error(erro?.detail || `Falha ao restaurar (HTTP ${r.status})`);
+    throw new Error(erro?.detail || `Falha ao revogar convite (HTTP ${r.status})`);
   }
-  const dados = await r.json();
-  return {
-    ok: dados.ok,
-    linhasRestauradas: dados.linhas_restauradas,
-    linksMarcadosVistos: dados.links_marcados_vistos,
-  };
+}
+
+export const convitesQuery = queryOptions({
+  queryKey: ["auth", "invites"],
+  queryFn: listarConvites,
+});
+
+export async function validarConvite(token: string): Promise<ConviteInfo | null> {
+  if (!API_URL) return null;
+  const r = await fetch(`${API_URL}/convites/${encodeURIComponent(token)}`, {
+    credentials: "include",
+  });
+  if (!r.ok) return null;
+  return (await r.json()) as ConviteInfo;
+}
+
+export async function aceitarConvite(token: string, usuario: string, senha: string): Promise<void> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/convites/${encodeURIComponent(token)}/aceitar`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ usuario, senha }),
+    credentials: "include",
+  });
+  if (!r.ok) {
+    const erro = await r.json().catch(() => null);
+    throw new Error(erro?.detail || `Falha ao aceitar convite (HTTP ${r.status})`);
+  }
 }

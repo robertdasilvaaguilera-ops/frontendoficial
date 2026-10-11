@@ -12,4 +12,8 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // O padrão do wrapper é "cloudflare-module" (deploy original via Lovable) -
+  // hospedando na Vercel agora, o build precisa gerar o formato que a
+  // própria Vercel entende (.vercel/output, Build Output API v3).
+  nitro: { preset: "vercel" },
 });

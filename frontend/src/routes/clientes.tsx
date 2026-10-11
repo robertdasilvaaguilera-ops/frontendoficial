@@ -1,9 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Plus, Search, Sparkles } from "lucide-react";
+import { Plus, Search, Sparkles, ShieldAlert } from "lucide-react";
 import { clientsQuery, opportunitiesQuery } from "@/lib/atlas-api";
 import { ClientFormModal } from "@/components/ClientFormModal";
+import { useSessaoAtual } from "@/components/AuthGate";
 
 export const Route = createFileRoute("/clientes")({
   head: () => ({
@@ -23,13 +24,38 @@ export const Route = createFileRoute("/clientes")({
   }),
   loader: ({ context }) => {
     if (typeof window === "undefined") return;
-    context.queryClient.ensureQueryData(clientsQuery);
+    // clientsQuery não entra aqui - básico não tem acesso (dá 403) e quem
+    // tem já busca dentro de ClientesConteudo, que só monta depois da
+    // checagem de nível abaixo.
     context.queryClient.ensureQueryData(opportunitiesQuery);
   },
   component: Clientes,
 });
 
 function Clientes() {
+  const sessao = useSessaoAtual();
+
+  // Minha Carteira é um recurso avançado - básico só tem Radar e Notícias.
+  // O backend já bloqueia (403) quem não tem acesso, isso aqui evita nem
+  // tentar buscar os dados pra quem não pode ver de qualquer forma.
+  if (sessao?.limites.recursosAvancados === false) {
+    return (
+      <div className="max-w-[1000px] mx-auto px-6 lg:px-10 py-8">
+        <div className="surface rounded-lg p-8 flex flex-col items-center text-center gap-3">
+          <ShieldAlert className="h-6 w-6 text-muted-foreground" />
+          <div className="text-sm font-medium">Minha Carteira não está no seu nível de acesso</div>
+          <p className="text-xs text-muted-foreground max-w-sm">
+            Seu nível de acesso é limitado a Radar Comercial e Notícias.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return <ClientesConteudo />;
+}
+
+function ClientesConteudo() {
   const { data: clients } = useSuspenseQuery(clientsQuery);
   const { data: opps } = useSuspenseQuery(opportunitiesQuery);
   const [q, setQ] = useState("");
