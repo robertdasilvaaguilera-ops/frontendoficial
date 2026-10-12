@@ -212,3 +212,48 @@ export async function aceitarConvite(token: string, usuario: string, senha: stri
     throw new Error(erro?.detail || `Falha ao aceitar convite (HTTP ${r.status})`);
   }
 }
+
+// Força uma rodada de coleta na hora, sem esperar o próximo horário agendado
+// (10:30/14:30/22:30 UTC) - útil pra conferir logo depois de mudar algo nos
+// coletores (ex: configurar um proxy) em vez de esperar horas.
+export async function coletarDecisoesAgora(): Promise<void> {
+  if (!API_URL) precisaDeApi();
+  const r = await fetch(`${API_URL}/admin/coletar-decisoes-agora`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!r.ok) {
+    const erro = await r.json().catch(() => null);
+    throw new Error(erro?.detail || `Falha na coleta (HTTP ${r.status})`);
+  }
+}
+
+export interface RestauracaoBackup {
+  ok: boolean;
+  linhasRestauradas: number;
+  linksMarcadosVistos: number;
+}
+
+// Restauração pontual do Excel de decisões perdido nos redeploys anteriores
+// ao volume persistente entrar em vigor - ver /admin/restaurar-decisoes-backup
+// em api_server.py. Uso único (backup local pré-migração).
+export async function restaurarDecisoesBackup(arquivo: File): Promise<RestauracaoBackup> {
+  if (!API_URL) precisaDeApi();
+  const form = new FormData();
+  form.append("arquivo", arquivo);
+  const r = await fetch(`${API_URL}/admin/restaurar-decisoes-backup`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  if (!r.ok) {
+    const erro = await r.json().catch(() => null);
+    throw new Error(erro?.detail || `Falha ao restaurar (HTTP ${r.status})`);
+  }
+  const dados = await r.json();
+  return {
+    ok: dados.ok,
+    linhasRestauradas: dados.linhas_restauradas,
+    linksMarcadosVistos: dados.links_marcados_vistos,
+  };
+}
