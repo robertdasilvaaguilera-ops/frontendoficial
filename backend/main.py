@@ -6,6 +6,19 @@ relevantes (tributario/societario/financeiro) e salva em Excel.
 Como rodar:
     python main.py
 """
+import sys
+
+# As legendas de Instagram geradas por ai/legenda_instagram.py usam emojis
+# (🎉, 💰) nos prints de diagnostico - no Linux (Railway) a saida padrao ja e
+# UTF-8, mas no Windows o console usa a codepage legada do sistema (ex:
+# cp1252), que nao tem esses caracteres e derruba o processo inteiro com
+# UnicodeEncodeError bem no meio da coleta, antes de salvar o Excel. Forca
+# UTF-8 aqui, uma vez, pra qualquer emoji/caractere especial em qualquer
+# print deste pipeline (agora ou no futuro) nunca mais travar a coleta.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 import json
 import os
 import re
